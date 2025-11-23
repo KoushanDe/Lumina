@@ -1,19 +1,23 @@
+
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GameCanvas } from './components/GameCanvas';
 import { GameStatus, GameSettings, ControlScheme, TutorialState, PlayerDatabase, PlayerProfile } from './types';
 import { LEVELS, WISDOM_QUOTES } from './constants';
 import { generateLevelNarrative } from './services/geminiService';
-import { Play, RotateCcw, Heart, Settings, X, Volume2, VolumeX, Music, HelpCircle, Map, Gamepad2, Smartphone, Home, ChevronLeft, ChevronRight, Anchor, Pause, BookOpen, User, ExternalLink, Coffee, Info, LogIn, Key, Sparkles, Copy } from 'lucide-react';
+import { Play, RotateCcw, Heart, Settings, X, Volume2, VolumeX, Music, HelpCircle, Map, Gamepad2, Smartphone, Home, ChevronLeft, ChevronRight, Anchor, Pause, BookOpen, User, ExternalLink, Coffee, Info, LogIn, Key, Sparkles, Copy, LogOut } from 'lucide-react';
 
 const App: React.FC = () => {
+  // Game State - Start at MENU by default
+  const [status, setStatus] = useState<GameStatus>(GameStatus.MENU);
+  
   // Auth State
-  const [status, setStatus] = useState<GameStatus>(GameStatus.AUTH);
   const [playerId, setPlayerId] = useState<string | null>(null);
+  const [showAuth, setShowAuth] = useState(false); // New modal state
   const [authInput, setAuthInput] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
-  const [newPlayerId, setNewPlayerId] = useState<string | null>(null); // For showing the modal after creation
+  const [newPlayerId, setNewPlayerId] = useState<string | null>(null);
 
-  // Game State
+  // Gameplay State
   const [levelId, setLevelId] = useState(1);
   const [narrative, setNarrative] = useState<string>("");
   const [loadingStory, setLoadingStory] = useState(false);
@@ -79,13 +83,13 @@ const App: React.FC = () => {
       setPlayerId(id);
       setMaxReachedLevel(db[id].maxReachedLevel);
       setSettings(db[id].settings);
-      setStatus(GameStatus.MENU);
       setAuthError(null);
       // Update last played
       db[id].lastPlayed = Date.now();
       saveDatabase(db);
       // Cache current session
       localStorage.setItem('lumina_current_player', id);
+      setShowAuth(false); // Close modal
     } else {
       setAuthError("Soul ID not found in the void.");
     }
@@ -110,17 +114,18 @@ const App: React.FC = () => {
     setPlayerId(newId);
     setNewPlayerId(newId); // Trigger modal
     setMaxReachedLevel(1);
-    setStatus(GameStatus.MENU);
     localStorage.setItem('lumina_current_player', newId);
+    // Don't close Auth immediately, show the new ID modal on top or within auth
+    setShowAuth(false);
   };
 
   const handleLogout = () => {
     setPlayerId(null);
-    setStatus(GameStatus.AUTH);
     setNewPlayerId(null);
     setAuthInput("");
+    setMaxReachedLevel(1); // Reset local progress view
     localStorage.removeItem('lumina_current_player');
-    stopBgm(); // Ensure music stops on logout
+    setShowSettings(false);
   };
 
   // --- PERSISTENCE ---
@@ -136,7 +141,7 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    // Check for auto-login
+    // Check for auto-login on mount
     const cachedId = localStorage.getItem('lumina_current_player');
     if (cachedId) {
       const db = getDatabase();
@@ -144,7 +149,6 @@ const App: React.FC = () => {
          setPlayerId(cachedId);
          setMaxReachedLevel(db[cachedId].maxReachedLevel);
          setSettings(db[cachedId].settings);
-         setStatus(GameStatus.MENU);
       }
     }
   }, []);
@@ -173,6 +177,7 @@ const App: React.FC = () => {
   const seqStepRef = useRef<number>(0);
   
   const HARP_SCALES = useRef({
+    menu: [196.00, 261.63, 311.13, 392.00, 523.25], // Cm Pentatonic - Mystical
     curious: [196.00, 220.00, 261.63, 293.66, 349.23, 392.00], 
     tense: [164.81, 185.00, 233.08, 261.63], 
     calm: [130.81, 164.81, 196.00, 261.63], 
@@ -264,7 +269,7 @@ const App: React.FC = () => {
   }, [settings.musicVolume]);
 
   const playBgmStep = useCallback(() => {
-    if (status !== GameStatus.PLAYING && status !== GameStatus.VICTORY && status !== GameStatus.GAME_OVER) return;
+    if (status !== GameStatus.PLAYING && status !== GameStatus.VICTORY && status !== GameStatus.GAME_OVER && status !== GameStatus.MENU) return;
     
     if (isChaosMode) {
         playChaosSound();
@@ -273,6 +278,29 @@ const App: React.FC = () => {
 
     seqStepRef.current = (seqStepRef.current + 1) % 32;
     const step = seqStepRef.current;
+
+    // --- MAIN MENU MUSIC ---
+    if (status === GameStatus.MENU) {
+        const scale = HARP_SCALES.menu;
+        // Slow, ambient, mystical pattern
+        if (step % 8 === 0) {
+            // Root note
+            playHarpNote(scale[0], 0.2, 4.0);
+        }
+        if (step % 16 === 4) {
+             // 5th or Octave
+             playHarpNote(scale[3], 0.15, 3.0);
+        }
+        if (step % 32 === 24) {
+            // High shimmer
+            playHarpNote(scale[4] * 2, 0.1, 5.0);
+        }
+        if (Math.random() < 0.1 && step % 4 === 0) {
+            const rNote = scale[Math.floor(Math.random() * scale.length)];
+            playHarpNote(rNote * 2, 0.05, 2.0);
+        }
+        return;
+    }
 
     if (status === GameStatus.VICTORY) {
        const scale = HARP_SCALES.hopeful;
@@ -336,7 +364,7 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    if (settings.musicVolume > 0 && (status === GameStatus.PLAYING || status === GameStatus.VICTORY || status === GameStatus.GAME_OVER)) {
+    if (settings.musicVolume > 0 && (status === GameStatus.PLAYING || status === GameStatus.VICTORY || status === GameStatus.GAME_OVER || status === GameStatus.MENU)) {
       startBgm();
     } else {
       stopBgm();
@@ -607,57 +635,6 @@ const App: React.FC = () => {
 
   const currentLevel = LEVELS.find(l => l.id === levelId);
 
-  if (status === GameStatus.AUTH) {
-    return (
-      <div className="min-h-screen bg-black flex flex-col items-center justify-center p-4 font-sans text-white overflow-hidden relative">
-         <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-indigo-950/40 via-black to-black"></div>
-         
-         <div className="relative z-10 w-full max-w-md animate-in fade-in zoom-in duration-1000">
-            <div className="text-center mb-12">
-               <h1 className="text-5xl font-bold mb-4 text-transparent bg-clip-text bg-gradient-to-b from-cyan-100 to-cyan-600 tracking-tighter" style={{ fontFamily: 'Cinzel, serif' }}>LUMINA</h1>
-               <div className="h-px w-24 bg-cyan-900 mx-auto"></div>
-            </div>
-
-            <div className="bg-zinc-900/50 border border-zinc-800 rounded-2xl p-8 backdrop-blur-md shadow-2xl">
-               <h2 className="text-center text-cyan-400 font-bold tracking-widest uppercase text-sm mb-6">Establish Connection</h2>
-               
-               <div className="space-y-6">
-                  {/* Returning Player */}
-                  <div>
-                    <form onSubmit={handleLogin} className="flex gap-2">
-                       <div className="relative flex-1">
-                          <input 
-                            type="text" 
-                            value={authInput}
-                            onChange={(e) => setAuthInput(e.target.value)}
-                            placeholder="Enter Soul ID"
-                            maxLength={6}
-                            className="w-full bg-black/50 border border-zinc-700 rounded px-4 py-3 text-center text-white tracking-[0.2em] font-mono focus:outline-none focus:border-cyan-500 transition placeholder:text-zinc-700 uppercase"
-                          />
-                          <Key size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600" />
-                       </div>
-                       <button type="submit" className="bg-cyan-900/80 hover:bg-cyan-800 text-cyan-200 px-4 rounded border border-cyan-800 transition"><LogIn size={20} /></button>
-                    </form>
-                    {authError && <p className="text-red-400 text-xs text-center mt-2 animate-pulse">{authError}</p>}
-                  </div>
-
-                  <div className="flex items-center gap-4">
-                     <div className="h-px flex-1 bg-zinc-800"></div>
-                     <span className="text-zinc-600 text-xs uppercase">Or</span>
-                     <div className="h-px flex-1 bg-zinc-800"></div>
-                  </div>
-
-                  {/* New Player */}
-                  <button onClick={handleCreateAccount} className="w-full py-4 bg-gradient-to-r from-indigo-900 to-purple-900 hover:from-indigo-800 hover:to-purple-800 border border-indigo-700 rounded-lg text-white font-bold tracking-wider uppercase text-xs flex items-center justify-center gap-2 transition-all shadow-[0_0_15px_rgba(79,70,229,0.2)] hover:shadow-[0_0_25px_rgba(79,70,229,0.4)]">
-                     <Sparkles size={16} /> Begin New Journey
-                  </button>
-               </div>
-            </div>
-         </div>
-      </div>
-    );
-  }
-
   return (
     <div className="min-h-screen bg-zinc-950 flex flex-col items-center justify-center p-4 font-sans text-white overflow-hidden relative selection:bg-cyan-500/30">
       <div className={`absolute top-4 left-0 right-0 flex justify-between px-8 pointer-events-none transition-opacity duration-1000 ${status === GameStatus.VICTORY ? 'opacity-0' : 'opacity-100'} z-40`}>
@@ -673,7 +650,11 @@ const App: React.FC = () => {
              ) : (
                <>
                  <h1 className="text-xl font-bold tracking-widest text-cyan-400" style={{ fontFamily: 'Orbitron, sans-serif', textShadow: '0 0 10px cyan' }}>LUMINA</h1>
-                 <p className="text-[10px] text-gray-500 tracking-widest uppercase">ID: <span className="text-gray-300 font-mono">{playerId}</span></p>
+                 {playerId ? (
+                   <p className="text-[10px] text-gray-500 tracking-widest uppercase">SOUL ID: <span className="text-gray-300 font-mono">{playerId}</span></p>
+                 ) : (
+                   <p className="text-[10px] text-gray-600 tracking-widest uppercase italic">Wandering Soul</p>
+                 )}
                </>
              )}
            </div>
@@ -732,6 +713,48 @@ const App: React.FC = () => {
 
                <button onClick={() => setNewPlayerId(null)} className="w-full py-3 bg-cyan-900 hover:bg-cyan-800 text-white rounded font-bold uppercase tracking-wider transition">I Have Saved It</button>
             </div>
+        </div>
+      )}
+
+      {/* AUTH MODAL */}
+      {showAuth && (
+        <div className="absolute inset-0 bg-black/95 flex items-center justify-center z-50 backdrop-blur-md animate-in fade-in">
+           <div className="bg-zinc-900 p-8 rounded-2xl border border-zinc-700 max-w-md w-full relative">
+              <button onClick={() => setShowAuth(false)} className="absolute top-4 right-4 text-gray-500 hover:text-white"><X size={20} /></button>
+              <h2 className="text-center text-cyan-400 font-bold tracking-widest uppercase text-sm mb-6">Establish Connection</h2>
+               
+               <div className="space-y-6">
+                  {/* Returning Player */}
+                  <div>
+                    <form onSubmit={handleLogin} className="flex gap-2">
+                       <div className="relative flex-1">
+                          <input 
+                            type="text" 
+                            value={authInput}
+                            onChange={(e) => setAuthInput(e.target.value)}
+                            placeholder="Enter Soul ID"
+                            maxLength={6}
+                            className="w-full bg-black/50 border border-zinc-700 rounded px-4 py-3 text-center text-white tracking-[0.2em] font-mono focus:outline-none focus:border-cyan-500 transition placeholder:text-zinc-700 uppercase"
+                          />
+                          <Key size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600" />
+                       </div>
+                       <button type="submit" className="bg-cyan-900/80 hover:bg-cyan-800 text-cyan-200 px-4 rounded border border-cyan-800 transition"><LogIn size={20} /></button>
+                    </form>
+                    {authError && <p className="text-red-400 text-xs text-center mt-2 animate-pulse">{authError}</p>}
+                  </div>
+
+                  <div className="flex items-center gap-4">
+                     <div className="h-px flex-1 bg-zinc-800"></div>
+                     <span className="text-zinc-600 text-xs uppercase">Or</span>
+                     <div className="h-px flex-1 bg-zinc-800"></div>
+                  </div>
+
+                  {/* New Player */}
+                  <button onClick={handleCreateAccount} className="w-full py-4 bg-gradient-to-r from-indigo-900 to-purple-900 hover:from-indigo-800 hover:to-purple-800 border border-indigo-700 rounded-lg text-white font-bold tracking-wider uppercase text-xs flex items-center justify-center gap-2 transition-all shadow-[0_0_15px_rgba(79,70,229,0.2)] hover:shadow-[0_0_25px_rgba(79,70,229,0.4)]">
+                     <Sparkles size={16} /> Begin New Journey
+                  </button>
+               </div>
+           </div>
         </div>
       )}
       
@@ -841,9 +864,11 @@ const App: React.FC = () => {
                  <div onClick={() => setSettings(s => ({ ...s, haptics: !s.haptics }))} className={`w-12 h-6 rounded-full relative transition duration-300 ${settings.haptics ? 'bg-pink-600' : 'bg-zinc-700'}`}><div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all duration-300 ${settings.haptics ? 'left-7' : 'left-1'}`}></div></div>
                </label>
                
-               <div className="pt-4 border-t border-zinc-800">
-                  <button onClick={handleLogout} className="w-full py-2 bg-red-900/50 hover:bg-red-900 text-red-300 border border-red-900/50 rounded uppercase text-xs tracking-wider transition">Disconnect Soul</button>
-               </div>
+               {playerId && (
+                   <div className="pt-4 border-t border-zinc-800">
+                      <button onClick={handleLogout} className="w-full py-2 bg-red-900/50 hover:bg-red-900 text-red-300 border border-red-900/50 rounded uppercase text-xs tracking-wider transition">Disconnect Soul</button>
+                   </div>
+               )}
              </div>
            </div>
         </div>
@@ -924,10 +949,25 @@ const App: React.FC = () => {
               </div>
               <h1 className="text-6xl font-bold mb-2 text-transparent bg-clip-text bg-gradient-to-b from-white to-cyan-400 tracking-tighter" style={{ fontFamily: 'Cinzel, serif' }}>LUMINA</h1>
               <div className="h-px w-32 bg-cyan-800 mb-8"></div>
+              
+              {playerId && <p className="text-xs text-gray-500 font-mono tracking-widest uppercase mb-6">SOUL ID: <span className="text-cyan-400">{playerId}</span></p>}
+
               <div className="flex flex-col gap-4 w-64">
                 {maxReachedLevel > 1 && <button onClick={handleResume} className="group relative px-4 py-3 bg-zinc-900 border border-zinc-700 hover:border-cyan-500 hover:text-cyan-400 text-gray-300 transition uppercase tracking-widest text-xs">Resume Journey</button>}
+                
                 <button onClick={handleStartNew} className="group relative px-4 py-3 bg-zinc-900 border border-zinc-700 hover:border-cyan-500 hover:text-cyan-400 text-gray-300 transition uppercase tracking-widest text-xs">New Game</button>
+                
                 <button onClick={() => setShowJourney(true)} className="group relative px-4 py-3 bg-zinc-900 border border-zinc-700 hover:border-purple-500 hover:text-purple-400 text-gray-300 transition uppercase tracking-widest text-xs flex items-center justify-center gap-2"><Map size={14} /> Journey</button>
+                
+                {!playerId ? (
+                    <button onClick={() => setShowAuth(true)} className="group relative px-4 py-3 bg-indigo-950 border border-indigo-800 hover:border-indigo-400 hover:text-indigo-300 text-indigo-400 transition uppercase tracking-widest text-xs flex items-center justify-center gap-2 shadow-[0_0_10px_rgba(79,70,229,0.1)]">
+                        <Key size={14} /> Connect Soul
+                    </button>
+                ) : (
+                    <button onClick={handleLogout} className="group relative px-4 py-3 bg-zinc-900 border border-zinc-800 hover:border-red-900 hover:text-red-400 text-gray-500 transition uppercase tracking-widest text-xs flex items-center justify-center gap-2">
+                        <LogOut size={14} /> Disconnect
+                    </button>
+                )}
               </div>
               <button onClick={() => setShowCredits(true)} className="mt-8 text-xs text-gray-600 hover:text-cyan-500 transition uppercase tracking-widest">Credits</button>
             </div>

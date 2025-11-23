@@ -249,7 +249,6 @@ const generateLevel = (config: LevelConfig): Level => {
     }
 
     // --- Level 7 Special Event: Purple Wisdom Pill ---
-    // Moved later in the level (0.85 instead of 0.65)
     if (config.id === 7 && miragePlaced && !purplePillPlaced && distRatio > 0.85) {
        entities.push(wall(cx, groundY, 400, 100));
        entities.push(pill(cx + 200, groundY - 100, "Hope is not a dream, but a way of making dreams become reality.", true));
@@ -292,7 +291,7 @@ const generateLevel = (config: LevelConfig): Level => {
       let gapBase = 100 + (config.id * 20); 
       if (gapBase > 200) gapBase = 200;
       let gapSize = gapBase + (Math.random() * 50);
-      if (config.id === 1) gapSize = Math.min(gapSize, 140);
+      if (config.id === 1) gapSize = Math.min(gapSize, 110); // FIX: Reduced max gap for Level 1 from 140 to 110
       if (config.id === 2) gapSize = Math.min(gapSize, 180);
 
       if (gapSize > 220) {
@@ -317,8 +316,14 @@ const generateLevel = (config: LevelConfig): Level => {
     else if (type < 0.6) {
       // PLATFORMING
       const h = 100 + Math.random() * 200;
-      const w = 120;
-      const yChange = (Math.random() - 0.5) * 180; 
+      let w = 120;
+      // FIX: Wider platforms for Level 1 to prevent slipping
+      if (config.id === 1) w = 200;
+
+      let yChange = (Math.random() - 0.5) * 180; 
+      // FIX: Flatter terrain for Level 1
+      if (config.id === 1) yChange = (Math.random() - 0.5) * 60;
+
       cy = Math.max(200, Math.min(height - 200, cy - yChange));
       
       if (config.id >= 3 && Math.random() < 0.2) {
@@ -336,7 +341,13 @@ const generateLevel = (config: LevelConfig): Level => {
         entities.push(monster(cx + w/2, cy - 30, 60));
         difficultyAccumulator += 1;
       }
-      cx += w + 100 + (Math.random() * 100); 
+      
+      // Calculate gap to next platform
+      let distToNext = 100 + (Math.random() * 100);
+      // FIX: Smaller jumps for Level 1
+      if (config.id === 1) distToNext = 50 + (Math.random() * 50);
+
+      cx += w + distToNext; 
     }
     else if (type < 0.85) {
       // COMBAT / PATROL SECTION
@@ -362,7 +373,6 @@ const generateLevel = (config: LevelConfig): Level => {
   
   // Level 4 Special Logic (Decoy)
   if (config.id === 4) {
-     // Moved closer to ensure visibility at start (was cx-600)
      const decoyX = cx - 300;
      const decoyY = groundY - 150;
      entities.push(npc(decoyX, decoyY, "decoy-npc"));

@@ -1,6 +1,6 @@
 
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { EntityType, GameStatus, Level, Particle, Vector2, GameSettings, Entity, TutorialState } from '../types';
+import { EntityType, GameStatus, Level, Particle, Vector2, GameSettings, Entity, TutorialState, CheckpointData } from '../types';
 import { 
   GRAVITY, FRICTION, MOVE_SPEED, MAX_SPEED, JUMP_FORCE, LEVELS, 
   COLOR_PLAYER, COLOR_PLAYER_GLOW, COLOR_PLAYER_EVIL, COLOR_PLAYER_EVIL_GLOW,
@@ -14,6 +14,7 @@ interface GameCanvasProps {
   currentLevelId: number;
   settings: GameSettings;
   initialHealth: number;
+  initialCheckpoint: CheckpointData | null;
   onLevelComplete: () => void;
   onGameOver: () => void;
   onGameWon: () => void;
@@ -21,9 +22,11 @@ interface GameCanvasProps {
   onUpdateMood: (distanceToGoal: number, distanceToMonster: number) => void;
   onHealthChange: (health: number) => void;
   onShowWisdom: (wisdom: string) => void;
-  onCheckpointSave: () => void;
+  onCheckpointSave: (data: CheckpointData) => void;
   onChaosStart: (active: boolean) => void;
   onTutorialUpdate?: (state: Partial<TutorialState>, activeMessage: string | null) => void;
+  onPlayerDied: () => void;
+  onLevelNameChange: (newName: string) => void;
 }
 
 export const GameCanvas: React.FC<GameCanvasProps> = ({ 
@@ -31,6 +34,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   currentLevelId, 
   settings,
   initialHealth,
+  initialCheckpoint,
   onLevelComplete, 
   onGameOver, 
   onGameWon,
@@ -40,10 +44,12 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   onShowWisdom,
   onCheckpointSave,
   onChaosStart,
-  onTutorialUpdate
+  onTutorialUpdate,
+  onPlayerDied,
+  onLevelNameChange
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const requestRef = useRef<number>();
+  const requestRef = useRef<number>(0);
   
   // Input State
   const [keys, setKeys] = useState<Record<string, boolean>>({});
@@ -79,11 +85,15 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
   // Evil Pill & Chaos
   const reversedControlsTimer = useRef<number>(0);
+  const evilDamageTimer = useRef<number>(0); // Timer for 0.5 dmg every 10s
   const chaosActive = useRef<boolean>(false);
 
   // Level 4 Decoy Physics
   const decoyVelocity = useRef<number>(0);
   const decoyWisdomTriggered = useRef<boolean>(false);
+
+  // Level 7 Logic
+  const mirageSeenTriggered = useRef<boolean>(false);
 
   // Tutorial State
   const tutorialState = useRef<TutorialState>({
@@ -91,9 +101,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
      moveRight: false,
      jump: false,
      hazardShown: false,
-     monsterShown: false
+     monsterShown: false,
+     evilPillShown: false
   });
   const activeTutorialMessage = useRef<string | null>(null);
+  const tutorialDelayTimer = useRef<number>(0); 
 
   // Projectiles
   const projectiles = useRef<Entity[]>([]);
@@ -110,27 +122,61 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   useEffect(() => {
     const baseLevel = LEVELS.find(l => l.id === currentLevelId) || LEVELS[0];
     const level = JSON.parse(JSON.stringify(baseLevel));
-    
     levelRef.current = level;
-    playerPos.current = { ...level.startPos };
-    lastCheckpointPos.current = { ...level.startPos }; 
-    
-    const startHealth = Math.max(1.0, initialHealth);
-    health.current = startHealth;
-    checkpointHealth.current = startHealth; 
+
+    // --- HYDRATE STATE FROM CHECKPOINT IF EXISTS ---
+    if (initialCheckpoint && initialCheckpoint.levelId === currentLevelId) {
+       playerPos.current = { ...initialCheckpoint.pos };
+       lastCheckpointPos.current = { ...initialCheckpoint.pos };
+       
+       const savedHealth = Math.max(0.5, initialCheckpoint.health);
+       health.current = savedHealth;
+       checkpointHealth.current = savedHealth;
+       
+       collectedPillIds.current = new Set(initialCheckpoint.collectedPillIds);
+       checkpointCollectedPills.current = new Set(initialCheckpoint.collectedPillIds);
+       
+       triggeredEvilPillIds.current = new Set(initialCheckpoint.triggeredEvilPillIds);
+       checkpointTriggeredEvilPills.current = new Set(initialCheckpoint.triggeredEvilPillIds);
+       
+       triggeredMirageId.current = initialCheckpoint.triggeredMirageId;
+       let minDist = 9999;
+       let cId = null;
+       level.entities.forEach((ent: Entity) => {
+          if (ent.type === EntityType.CHECKPOINT) {
+              const d = Math.sqrt(Math.pow(ent.pos.x + 15 - initialCheckpoint.pos.x, 2) + Math.pow(ent.pos.y + 30 - initialCheckpoint.pos.y, 2));
+              if (d < 100 && d < minDist) { minDist = d; cId = ent.id; }
+          }
+       });
+       activeCheckpointId.current = cId;
+       
+       onHealthChange(savedHealth);
+    } else {
+       // --- DEFAULT START ---
+       playerPos.current = { ...level.startPos };
+       lastCheckpointPos.current = { ...level.startPos }; 
+       
+       const startHealth = Math.max(1.0, initialHealth);
+       health.current = startHealth;
+       checkpointHealth.current = startHealth; 
+       
+       collectedPillIds.current = new Set();
+       checkpointCollectedPills.current = new Set();
+       triggeredEvilPillIds.current = new Set();
+       checkpointTriggeredEvilPills.current = new Set();
+       triggeredMirageId.current = null;
+       activeCheckpointId.current = null;
+       
+       onHealthChange(startHealth);
+    }
+
     healthDrainActive.current = false;
-    
     playerVel.current = { x: 0, y: 0 };
     jumpCount.current = 0;
     particles.current = [];
     projectiles.current = [];
     invulnerableFrames.current = 0;
-    activeCheckpointId.current = null;
-    collectedPillIds.current = new Set();
-    checkpointCollectedPills.current = new Set();
-    triggeredEvilPillIds.current = new Set();
-    checkpointTriggeredEvilPills.current = new Set();
-    triggeredMirageId.current = null;
+    
     mirageFadeAlpha.current = 1.0;
     reversedControlsTimer.current = 0;
     chaosActive.current = false;
@@ -139,27 +185,34 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     
     decoyVelocity.current = 0;
     decoyWisdomTriggered.current = false;
+    mirageSeenTriggered.current = false;
 
-    // Reset Tutorial State on New Game Level 1
-    if (currentLevelId === 1) {
+    // Reset Tutorial State
+    if (currentLevelId === 1 && (!initialCheckpoint || initialCheckpoint.levelId !== 1)) {
        tutorialState.current = {
           moveLeft: false,
           moveRight: false,
           jump: false,
           hazardShown: false,
-          monsterShown: false
+          monsterShown: false,
+          evilPillShown: false
        };
-       activeTutorialMessage.current = "Use Arrow Keys or WASD to move.";
-       if (onTutorialUpdate) onTutorialUpdate(tutorialState.current, activeTutorialMessage.current);
+       activeTutorialMessage.current = null; 
+       tutorialDelayTimer.current = 60; 
+       if (onTutorialUpdate) onTutorialUpdate(tutorialState.current, null);
     } else {
-       if (onTutorialUpdate) onTutorialUpdate({}, null); // Clear tutorials
+       // Reset local tutorial state for other levels so flags don't persist oddly, 
+       // but we only really care about evilPillShown later
+       tutorialState.current = {
+           moveLeft: true, moveRight: true, jump: true, hazardShown: true, monsterShown: true,
+           evilPillShown: false
+       };
+       if (onTutorialUpdate) onTutorialUpdate({}, null); 
     }
 
-    onHealthChange(startHealth);
-
     cameraPos.current = {
-      x: Math.max(0, level.startPos.x - 400),
-      y: Math.max(0, level.startPos.y - 300)
+      x: Math.max(0, playerPos.current.x - 400),
+      y: Math.max(0, playerPos.current.y - 300)
     };
     victoryAnimStart.current = 0;
     
@@ -196,40 +249,29 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
   const takeDamage = useCallback((amount: number, sourceX?: number, cause: 'void' | 'hazard' | 'normal' = 'normal') => {
       if (status !== GameStatus.PLAYING) return;
-      
-      // If already draining, don't trigger damage again
       if (healthDrainActive.current) return;
-
       if (invulnerableFrames.current > 0 && cause !== 'void' && cause !== 'hazard') return;
       
-      // LOGIC 1 & 2: Instant Kill / Health Drain
       if (cause === 'void' || cause === 'hazard') {
-           // Start Health Drain Phase
            healthDrainActive.current = true;
            deathCause.current = cause;
-           // We do NOT set health to 0 instantly. We let the update loop drain it.
-           // Input will be locked in update()
-           onPlaySound('die'); // Play sound once at start of drain
+           onPlaySound('die'); 
            triggerHaptic(300);
            return;
       } 
       
-      // LOGIC 3, 4, 5: Standard Damage
       health.current -= amount;
-      
       onHealthChange(health.current);
       onPlaySound('die');
       triggerHaptic(100);
       
       if (health.current <= 0) {
-        // Died from standard damage (e.g. at 0.5 HP and hit monster)
         health.current = 0;
         deathCause.current = 'hazard';
         respawnTimer.current = 90; 
       } else {
-        // Survived hit
         spawnParticles(playerPos.current.x, playerPos.current.y, '#ff0000', 20);
-        invulnerableFrames.current = 120; // 2s invincibility
+        invulnerableFrames.current = 120; 
         playerVel.current.y = -8;
         if (sourceX !== undefined) {
           playerVel.current.x = (playerPos.current.x - sourceX) > 0 ? 10 : -10;
@@ -243,50 +285,47 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     globalTime.current += 0.02;
     if (invulnerableFrames.current > 0) invulnerableFrames.current--;
 
-    // --- TUTORIAL LOGIC LEVEL 1 ---
+    // --- TUTORIAL LOGIC ---
     if (currentLevelId === 1 && onTutorialUpdate) {
-        let needsUpdate = false;
-        const pos = playerPos.current;
-
-        // 1. Movement Check (Action Based)
-        // Handled in input section below
-
-        // 2. Hazard Check (Position Based) - Approx first hazard location
-        if (!tutorialState.current.hazardShown && pos.x > 800) {
-            activeTutorialMessage.current = "Red Obstacles and Void are fatal. Avoid them.";
-            tutorialState.current.hazardShown = true;
-            needsUpdate = true;
-            // Auto dismiss hazard message after 4 seconds
-            setTimeout(() => {
-                 if (activeTutorialMessage.current && activeTutorialMessage.current.includes("Red")) {
-                     activeTutorialMessage.current = null;
-                     if (onTutorialUpdate) onTutorialUpdate({}, null);
-                 }
-            }, 4000);
+        if (tutorialDelayTimer.current > 0) {
+            tutorialDelayTimer.current--;
+            if (tutorialDelayTimer.current <= 0 && !activeTutorialMessage.current && !tutorialState.current.moveRight) {
+                 activeTutorialMessage.current = "Use Arrow Keys or WASD to move.";
+                 onTutorialUpdate(tutorialState.current, activeTutorialMessage.current);
+            }
+        } else {
+            let needsUpdate = false;
+            const pos = playerPos.current;
+            if (!tutorialState.current.hazardShown && pos.x > 800) {
+                activeTutorialMessage.current = "Red Obstacles and Void are fatal. Avoid them.";
+                tutorialState.current.hazardShown = true;
+                needsUpdate = true;
+                setTimeout(() => {
+                    if (activeTutorialMessage.current && activeTutorialMessage.current.includes("Red")) {
+                        activeTutorialMessage.current = null;
+                        if (onTutorialUpdate) onTutorialUpdate({}, null);
+                    }
+                }, 4000);
+            }
+            if (!tutorialState.current.monsterShown && pos.x > 2200) {
+                activeTutorialMessage.current = "Monsters hurt you. Jump over them.";
+                tutorialState.current.monsterShown = true;
+                needsUpdate = true;
+                setTimeout(() => {
+                    if (activeTutorialMessage.current && activeTutorialMessage.current.includes("Monsters")) {
+                        activeTutorialMessage.current = null;
+                        if (onTutorialUpdate) onTutorialUpdate({}, null);
+                    }
+                }, 4000);
+            }
+            if (needsUpdate) onTutorialUpdate(tutorialState.current, activeTutorialMessage.current);
         }
-
-        // 3. Monster Check (Position Based) - Approx first monster location
-        if (!tutorialState.current.monsterShown && pos.x > 2200) {
-            activeTutorialMessage.current = "Monsters hurt you. Jump over them.";
-            tutorialState.current.monsterShown = true;
-            needsUpdate = true;
-             // Auto dismiss after 4 seconds
-             setTimeout(() => {
-                 if (activeTutorialMessage.current && activeTutorialMessage.current.includes("Monsters")) {
-                     activeTutorialMessage.current = null;
-                     if (onTutorialUpdate) onTutorialUpdate({}, null);
-                 }
-            }, 4000);
-        }
-        
-        if (needsUpdate) onTutorialUpdate(tutorialState.current, activeTutorialMessage.current);
     }
-
 
     // --- HEALTH DRAIN LOGIC ---
     if (healthDrainActive.current) {
         if (health.current > 0) {
-            health.current -= (1/30); // ~2 HP/sec drain speed
+            health.current -= (1/30); 
             if (health.current < 0) health.current = 0;
             onHealthChange(health.current);
             
@@ -294,18 +333,14 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
                 playerVel.current.x = 0;
                 playerVel.current.y = 0;
             } else {
-                // Void
                 playerVel.current.x *= 0.9;
                 playerVel.current.y += GRAVITY; 
                 playerPos.current.y += playerVel.current.y;
             }
         } else {
-            // Drain complete, start actual death sequence
             healthDrainActive.current = false;
             respawnTimer.current = 90;
         }
-        
-        // Update particles and return (skip input/physics)
         for (let i = particles.current.length - 1; i >= 0; i--) {
             const p = particles.current[i];
             p.x += p.vx;
@@ -313,20 +348,14 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             p.life -= 0.015;
             if (p.life <= 0) particles.current.splice(i, 1);
         }
-        
-        // Camera follow for void fall
         if (deathCause.current === 'void') {
-           const canvasW = 800;
-           const canvasH = 600;
-           const targetCamY = playerPos.current.y - canvasH / 2;
-           cameraPos.current.y += (targetCamY - cameraPos.current.y) * 0.1;
+           cameraPos.current.y += (playerPos.current.y - 600/2 - cameraPos.current.y) * 0.1;
         }
         return;
     }
 
     // --- STANDARD DEATH/RESPAWN ---
     if (health.current <= 0 && !healthDrainActive.current) {
-       // Stop chaos on death
        if (chaosActive.current) {
           chaosActive.current = false;
           reversedControlsTimer.current = 0;
@@ -334,6 +363,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
        }
 
        if (respawnTimer.current === 0) respawnTimer.current = 90;
+       
+       if (respawnTimer.current === 90) {
+           onPlayerDied();
+       }
+
        respawnTimer.current--;
 
        if (respawnTimer.current <= 0) {
@@ -341,32 +375,28 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           playerVel.current = { x: 0, y: 0 };
           health.current = checkpointHealth.current;
           
-          // Persistence Restore
           collectedPillIds.current = new Set(checkpointCollectedPills.current);
           triggeredEvilPillIds.current = new Set(checkpointTriggeredEvilPills.current);
 
-          // Reset Evil Pill positions if they are active (not in triggered set)
           levelRef.current.entities.forEach(ent => {
              if (ent.type === EntityType.EVIL_PILL && !triggeredEvilPillIds.current.has(ent.id)) {
                 if (ent.initialPos) {
                    ent.pos = { ...ent.initialPos };
                    ent.velocity = { x: 0, y: 0 };
-                   if (ent.properties) ent.properties.active = false; // Reset activation state
+                   if (ent.properties) ent.properties.active = false; 
                 }
              }
           });
 
           invulnerableFrames.current = 60;
-          projectiles.current = []; // Clear projectiles
+          projectiles.current = [];
           onHealthChange(health.current);
           deathCause.current = 'hazard'; 
           healthDrainActive.current = false;
           
-          const canvasW = 800;
-          const canvasH = 600;
           cameraPos.current = {
-               x: Math.max(0, playerPos.current.x - canvasW/2),
-               y: Math.max(0, playerPos.current.y - canvasH/2)
+               x: Math.max(0, playerPos.current.x - 800/2),
+               y: Math.max(0, playerPos.current.y - 600/2)
           };
           onPlaySound('respawn');
        }
@@ -387,11 +417,19 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
     portalRotation.current += 0.02;
 
-    // --- Reverse Controls / Chaos Logic ---
+    // --- Chaos Logic ---
     if (reversedControlsTimer.current > 0) {
        reversedControlsTimer.current--;
        
-       // Drunken Movement
+       // Damage every 10 seconds (600 frames)
+       if (evilDamageTimer.current > 0) {
+           evilDamageTimer.current--;
+       } else {
+           // Deal damage
+           evilDamageTimer.current = 600;
+           takeDamage(0.5, undefined, 'normal');
+       }
+
        if (Math.random() < 0.1) vel.x += (Math.random() - 0.5) * 3;
        
        if (!chaosActive.current) {
@@ -404,7 +442,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
        }
     }
 
-    // --- Evil Pill Logic (Chaser) ---
+    // --- Evil Pill AI ---
     for (let i = level.entities.length - 1; i >= 0; i--) {
        const ent = level.entities[i];
        if (ent.type === EntityType.EVIL_PILL) {
@@ -414,9 +452,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           if (!ent.properties) ent.properties = { active: false };
           
           const distToPlayer = Math.sqrt(Math.pow(pos.x - ent.pos.x, 2) + Math.pow(pos.y - ent.pos.y, 2));
-          
-          // Activation: Only activate if very close (inside frame significantly) or already active
-          // Canvas width is 800. Center to edge is 400. 
           if (!ent.properties.active && distToPlayer < 450) {
               ent.properties.active = true;
           }
@@ -424,27 +459,17 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           if (ent.properties.active) {
              const dx = pos.x - ent.pos.x;
              const dy = pos.y - ent.pos.y;
-             
-             // Independent Movement AI
-             // Reduced max speed from 11 to 9.2 (Player is 8)
              const EVIL_SPEED = 9.2;
              const EVIL_ACCEL = 0.8;
-             const wobble = Math.sin(globalTime.current * 15) * 0.5; // Organic wobble
-             
+             const wobble = Math.sin(globalTime.current * 15) * 0.5;
              ent.velocity.x += (Math.sign(dx) * EVIL_ACCEL) + wobble;
-             ent.velocity.x *= 0.92; // Friction
-             
+             ent.velocity.x *= 0.92;
              if (Math.abs(ent.velocity.x) > EVIL_SPEED) ent.velocity.x = Math.sign(ent.velocity.x) * EVIL_SPEED;
-             
              ent.velocity.y += GRAVITY;
              
-             // Intelligence: Check for gap ahead to avoid dumb falling
-             // Look ahead slightly more than before to catch gaps at high speed
              const lookAheadX = ent.velocity.x > 0 ? ent.pos.x + ent.size.x + 60 : ent.pos.x - 60;
              const lookDownY = ent.pos.y + ent.size.y + 20;
              let groundAhead = false;
-             
-             // Check against walls for collision & intelligence
              let pillHitY = false;
              let pillHitX = false;
              const nextPX = ent.pos.x + ent.velocity.x;
@@ -452,13 +477,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
              
              for (const wall of level.entities) {
                  if (wall.type === EntityType.PLATFORM || wall.type === EntityType.MOVING_PLATFORM) {
-                     // Intelligence Check
                      if (lookAheadX > wall.pos.x && lookAheadX < wall.pos.x + wall.size.x &&
                          lookDownY > wall.pos.y && lookDownY < wall.pos.y + wall.size.y) {
                          groundAhead = true;
                      }
-
-                     // Collision Y
                      if (nextPX + ent.size.x > wall.pos.x && nextPX < wall.pos.x + wall.size.x &&
                          nextPY + ent.size.y > wall.pos.y && nextPY < wall.pos.y + wall.size.y) {
                          if (ent.velocity.y > 0 && ent.pos.y + ent.size.y <= wall.pos.y + 10) {
@@ -467,7 +489,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
                              pillHitY = true;
                          }
                      }
-                     // Collision X
                      if (nextPX + ent.size.x > wall.pos.x && nextPX < wall.pos.x + wall.size.x &&
                          ent.pos.y + ent.size.y > wall.pos.y && ent.pos.y < wall.pos.y + wall.size.y) {
                             ent.velocity.x = 0;
@@ -479,48 +500,52 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
              if (!pillHitX) ent.pos.x += ent.velocity.x;
              if (!pillHitY) ent.pos.y += ent.velocity.y;
              
-             // AI Decisions
-             if (pillHitY) { // On Ground
-                 // 1. Hit Wall? Jump
+             if (pillHitY) { 
                  if (pillHitX) ent.velocity.y = -14;
-                 
-                 // 2. Gap Ahead? Always jump to survive, independent of player
                  if (!groundAhead && Math.abs(ent.velocity.x) > 1) {
-                     ent.velocity.y = -13; // Jump gap
-                     ent.velocity.x += Math.sign(ent.velocity.x) * 4; // Boost over gap
+                     ent.velocity.y = -13; 
+                     ent.velocity.x += Math.sign(ent.velocity.x) * 4; 
                  }
-                 
-                 // 3. Player High Above? Chance to jump to reach
                  if (dy < -120 && Math.random() < 0.05) {
                      ent.velocity.y = -15;
                  }
              }
              
-             // Void Death for Evil Pill - Mark as triggered so it's gone
              if (ent.pos.y > level.height + 200) {
                 triggeredEvilPillIds.current.add(ent.id);
                 continue;
              }
              
-             // Collision with Player
              if (Math.abs(pos.x - ent.pos.x) < 20 && Math.abs(pos.y - ent.pos.y) < 20) {
-                // Trigger Effect
                 if (reversedControlsTimer.current <= 0) {
-                    reversedControlsTimer.current = 1800; // 30 seconds at 60fps
+                    reversedControlsTimer.current = 2400; // 40 seconds at 60fps
+                    evilDamageTimer.current = 600; // First damage in 10 seconds
                     onPlaySound('panic');
                     triggerHaptic([100, 50, 100, 50, 100]);
                     triggeredEvilPillIds.current.add(ent.id);
+                    
+                    // Show Tutorial if first time
+                    if (!tutorialState.current.evilPillShown && onTutorialUpdate) {
+                        activeTutorialMessage.current = "You are infected! Find a Wisdom Pill to cleanse the chaos!";
+                        tutorialState.current.evilPillShown = true;
+                        onTutorialUpdate(tutorialState.current, activeTutorialMessage.current);
+                        setTimeout(() => {
+                           if (activeTutorialMessage.current && activeTutorialMessage.current.includes("infected")) {
+                              activeTutorialMessage.current = null;
+                              if (onTutorialUpdate) onTutorialUpdate({}, null);
+                           }
+                        }, 5000);
+                    }
                     continue; 
                 }
              }
           } else {
-             // Not active, stay still
              ent.velocity = { x: 0, y: 0 };
           }
        }
     }
 
-    // --- Shooter Monster Logic ---
+    // --- Shooter Logic ---
     level.entities.forEach(ent => {
         if (ent.type === EntityType.SHOOTER) {
             const dist = Math.sqrt(Math.pow(pos.x - ent.pos.x, 2) + Math.pow(pos.y - ent.pos.y, 2));
@@ -528,7 +553,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
                 if (!ent.properties) ent.properties = { cooldown: 0 };
                 if (ent.properties.cooldown > 0) ent.properties.cooldown--;
                 else {
-                    // Shoot
                     const angle = Math.atan2((pos.y - 10) - ent.pos.y, pos.x - ent.pos.x);
                     const speed = 6;
                     const proj: Entity = {
@@ -540,31 +564,25 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
                         color: COLOR_PROJECTILE
                     };
                     projectiles.current.push(proj);
-                    ent.properties.cooldown = 150; // 2.5s cooldown
+                    ent.properties.cooldown = 150; 
                 }
             }
         }
     });
 
-    // --- Projectiles Logic ---
     for (let i = projectiles.current.length - 1; i >= 0; i--) {
         const p = projectiles.current[i];
         if (p.velocity) {
             p.pos.x += p.velocity.x;
             p.pos.y += p.velocity.y;
         }
-        
-        // Hit Player
         if (Math.abs(p.pos.x - pos.x) < 15 && Math.abs(p.pos.y - pos.y) < 15) {
             takeDamage(0.5, p.pos.x, 'normal');
             projectiles.current.splice(i, 1);
             continue;
         }
-
-        // Hit Walls/Out of bounds
         let hitWall = false;
         if (p.pos.y > level.height + 100 || p.pos.y < -500) hitWall = true;
-        
         for (const wall of level.entities) {
              if (wall.type === EntityType.PLATFORM && 
                  p.pos.x > wall.pos.x && p.pos.x < wall.pos.x + wall.size.x &&
@@ -573,10 +591,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
                  break;
              }
         }
-
         if (hitWall) projectiles.current.splice(i, 1);
     }
-
 
     // Moving Platform Logic
     level.entities.forEach(ent => {
@@ -596,13 +612,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       const npcEntity = level.entities.find(e => e.id === 'decoy-npc');
       if (npcEntity) {
         const distToNpc = Math.sqrt(Math.pow(pos.x - npcEntity.pos.x, 2) + Math.pow(pos.y - npcEntity.pos.y, 2));
-        if (distToNpc < 400) { // Trigger earlier
-           decoyVelocity.current += 0.2; // Acceleration
+        if (distToNpc < 400) { 
+           decoyVelocity.current += 0.2; 
            npcEntity.pos.x += decoyVelocity.current;
            const plat = level.entities.find(e => e.id === 'decoy-platform');
            if (plat) plat.pos.x += decoyVelocity.current;
-           
-           // Wisdom Logic
            if (!decoyWisdomTriggered.current && npcEntity.pos.x > cameraPos.current.x + 900) {
                onShowWisdom("Some paths are not meant to be caught, but to lead us forward.");
                decoyWisdomTriggered.current = true;
@@ -620,17 +634,14 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     });
 
     if (status === GameStatus.PLAYING) {
-      // --- INPUT HANDLING WITH REVERSE LOGIC ---
       let leftInput = keys['ArrowLeft'] || keys['KeyA'] || touchInput.left;
       let rightInput = keys['ArrowRight'] || keys['KeyD'] || touchInput.right;
       let involuntaryMove = false;
       
-      // Tutorial Action Dismissal
       if (currentLevelId === 1 && onTutorialUpdate) {
          if ((leftInput || rightInput) && (!tutorialState.current.moveLeft || !tutorialState.current.moveRight)) {
              tutorialState.current.moveLeft = true;
              tutorialState.current.moveRight = true;
-             // Only clear if Jump is also done OR if current message is just about movement
              if (activeTutorialMessage.current && activeTutorialMessage.current.includes("Move")) {
                   if (tutorialState.current.jump) {
                       activeTutorialMessage.current = null;
@@ -643,12 +654,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       }
 
       if (reversedControlsTimer.current > 0) {
-          // If player tries to control, inputs are swapped
           const temp = leftInput;
           leftInput = rightInput;
           rightInput = temp;
-          
-          // If NO input is given, move backwards involuntarily
           if (!keys['ArrowLeft'] && !keys['KeyA'] && !touchInput.left && 
               !keys['ArrowRight'] && !keys['KeyD'] && !touchInput.right) {
               involuntaryMove = true;
@@ -659,7 +667,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
       if (invulnerableFrames.current < 100) { 
         if (involuntaryMove) {
-            // Move left (backwards) slowly
             vel.x -= MOVE_SPEED * 0.5;
         } else {
             if (rightInput) vel.x += MOVE_SPEED;
@@ -677,7 +684,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           triggerHaptic(10);
           spawnParticles(pos.x, pos.y + 10, '#fff', 3);
           
-          // Tutorial Jump Dismissal
           if (currentLevelId === 1 && onTutorialUpdate && !tutorialState.current.jump) {
              tutorialState.current.jump = true;
              if (activeTutorialMessage.current && activeTutorialMessage.current.includes("Jump")) {
@@ -705,37 +711,33 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         const entH = ent.size?.y || 20;
 
         if (ent.type === EntityType.PLATFORM || ent.type === EntityType.MOVING_PLATFORM) {
+          // X-Axis Collision Check with Leniency:
+          // Ignore the bottom 5px of the player to prevent floor-friction as wall-hit.
           if (nextX + 10 > ent.pos.x && nextX - 10 < ent.pos.x + entW &&
-              pos.y + 10 > ent.pos.y && pos.y - 10 < ent.pos.y + entH) {
+              pos.y + 5 > ent.pos.y && pos.y - 10 < ent.pos.y + entH) {
             vel.x = 0;
             hitX = true;
           }
         }
         
-        // --- MONSTER COLLISIONS ---
         if (ent.type === EntityType.MONSTER) {
            const dist = Math.sqrt(Math.pow(pos.x - ent.pos.x, 2) + Math.pow(pos.y - ent.pos.y, 2));
            if (dist < minMonsterDist) minMonsterDist = dist;
-
            if (pos.x + 10 > ent.pos.x && pos.x - 10 < ent.pos.x + entW &&
                pos.y + 10 > ent.pos.y && pos.y - 10 < ent.pos.y + entH) {
                takeDamage(0.5, ent.pos.x + entW/2, 'normal');
            }
         }
         
-        // --- SHOOTER COLLISIONS ---
-        // Touching Shooter body is harmless (Logic 4)
         if (ent.type === EntityType.SHOOTER) {
            const dist = Math.sqrt(Math.pow(pos.x - ent.pos.x, 2) + Math.pow(pos.y - ent.pos.y, 2));
            if (dist < minMonsterDist) minMonsterDist = dist;
-           // No damage on collision
         }
 
-        // --- HAZARD COLLISIONS ---
         if (ent.type === EntityType.HAZARD) {
            if (pos.x + 10 > ent.pos.x && pos.x - 10 < ent.pos.x + entW &&
                pos.y + 10 > ent.pos.y && pos.y - 10 < ent.pos.y + entH) {
-               takeDamage(0, undefined, 'hazard'); // 0 amount because hazard drains all
+               takeDamage(0, undefined, 'hazard'); 
                return; 
            }
         }
@@ -749,7 +751,16 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
                  checkpointHealth.current = health.current;
                  checkpointCollectedPills.current = new Set(collectedPillIds.current);
                  checkpointTriggeredEvilPills.current = new Set(triggeredEvilPillIds.current);
-                 onCheckpointSave();
+                 
+                 const checkpointData: CheckpointData = {
+                     levelId: currentLevelId,
+                     pos: { ...lastCheckpointPos.current },
+                     health: health.current,
+                     collectedPillIds: Array.from(checkpointCollectedPills.current),
+                     triggeredEvilPillIds: Array.from(checkpointTriggeredEvilPills.current),
+                     triggeredMirageId: triggeredMirageId.current
+                 };
+                 onCheckpointSave(checkpointData);
                  triggerHaptic(50);
                  onPlaySound('checkpoint'); 
                  spawnParticles(ent.pos.x + 15, ent.pos.y + 30, COLOR_CHECKPOINT_ACTIVE, 10);
@@ -761,37 +772,55 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
                pos.y + 10 > ent.pos.y && pos.y - 10 < ent.pos.y + entH) {
                collectedPillIds.current.add(ent.id);
                
-               // Logic for Purple vs Gold Pill
-               const isPurple = ent.properties?.isPurple;
-               if (isPurple) {
-                  health.current += 2.0;
-                  onPlaySound('hopeful_pill');
-                  onShowWisdom(ent.wisdom || "Hope found.");
-                  spawnParticles(ent.pos.x, ent.pos.y, '#a855f7', 25, 'flower');
+               // CURE CHAOS
+               if (reversedControlsTimer.current > 0) {
+                   reversedControlsTimer.current = 0;
+                   evilDamageTimer.current = 0;
+                   chaosActive.current = false;
+                   onChaosStart(false);
+                   onShowWisdom("Chaos Cleansed. Your resolve is restored.");
+                   onPlaySound('hopeful_pill');
+                   spawnParticles(ent.pos.x, ent.pos.y, '#ffd700', 20, 'spark');
                } else {
-                  health.current += 0.5; 
-                  onPlaySound('pill');
-                  if (ent.wisdom) onShowWisdom(ent.wisdom);
-                  spawnParticles(ent.pos.x, ent.pos.y, '#ffd700', 15, 'flower');
+                   // Normal Wisdom logic
+                   const isPurple = ent.properties?.isPurple;
+                   if (isPurple) {
+                      health.current += 2.0;
+                      onPlaySound('hopeful_pill');
+                      onShowWisdom(ent.wisdom || "Hope found.");
+                      spawnParticles(ent.pos.x, ent.pos.y, '#a855f7', 25, 'flower');
+                   } else {
+                      health.current += 0.5; 
+                      onPlaySound('pill');
+                      if (ent.wisdom) onShowWisdom(ent.wisdom);
+                      spawnParticles(ent.pos.x, ent.pos.y, '#ffd700', 15, 'flower');
+                   }
                }
+               
                onHealthChange(health.current);
                triggerHaptic([50, 50]);
            }
         }
 
-        // --- Mirage NPC Logic (Level 7) ---
         if (ent.type === EntityType.MIRAGE_NPC && triggeredMirageId.current !== ent.id) {
             const dist = Math.sqrt(Math.pow(pos.x - ent.pos.x, 2) + Math.pow(pos.y - ent.pos.y, 2));
+            
+            // Level 7: Detect proximity to trigger happy music and name change
+            if (!mirageSeenTriggered.current && dist < 500) {
+                // We use onUpdateMood to trick the App into playing hopeful music 
+                // by pretending we are very close to the level goal
+                onUpdateMood(0, 9999); 
+                mirageSeenTriggered.current = true;
+            }
+
             if (dist < 40) {
-                // Trigger event
                 triggeredMirageId.current = ent.id;
-                health.current -= 1.0; // Logic 5: Deplete 1.0 health
+                onLevelNameChange("Fragmented Hope"); // Name reveal
+                health.current -= 1.0; 
                 onHealthChange(health.current);
                 onPlaySound('sad');
                 onShowWisdom("Sometimes, what we chase is only a reflection of our own longing.");
                 spawnParticles(ent.pos.x, ent.pos.y, COLOR_NPC, 20, 'spark');
-                
-                // If this kills the player, trigger death
                 if (health.current <= 0) {
                     health.current = 0;
                     deathCause.current = 'hazard';
@@ -806,19 +835,28 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         if (ent.type === EntityType.PLATFORM || ent.type === EntityType.MOVING_PLATFORM) {
           const entW = ent.size?.x || 20;
           const entH = ent.size?.y || 20;
+          
+          // Collision check using FUTURE Y (nextY)
           if (pos.x + 10 > ent.pos.x && pos.x - 10 < ent.pos.x + entW &&
               nextY + 10 > ent.pos.y && nextY - 10 < ent.pos.y + entH) {
+            
             if (vel.y > 0 && pos.y < ent.pos.y) {
+               // Landed on top
                pos.y = ent.pos.y - 10;
                vel.y = 0;
                hitY = true;
                jumpCount.current = 0;
                airTime.current = 0;
+               
+               // PLATFORM RIDING LOGIC
+               // Apply platform velocity directly to position for smooth riding
                if (ent.type === EntityType.MOVING_PLATFORM && ent.velocity) {
                    pos.x += ent.velocity.x;
-                   pos.y += ent.velocity.y;
+                   // Do NOT add Y velocity, as snapping to ent.pos.y already accounts for it.
+                   // pos.y += ent.velocity.y; 
                }
             } else if (vel.y < 0 && pos.y > ent.pos.y + entH) {
+               // Hit head
                pos.y = ent.pos.y + entH + 10;
                vel.y = 0;
                hitY = true;
@@ -834,14 +872,21 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       const dx = pos.x - level.goalPos.x;
       const dy = pos.y - level.goalPos.y;
       const distToGoal = Math.sqrt(dx*dx + dy*dy);
-      onUpdateMood(distToGoal, minMonsterDist);
+      
+      // If we already triggered mirage sight music, ignore normal logic for a bit
+      if (currentLevelId === 7 && mirageSeenTriggered.current && !triggeredMirageId.current) {
+          onUpdateMood(0, 9999);
+      } else {
+          onUpdateMood(distToGoal, minMonsterDist);
+      }
 
       if (distToGoal < 30) {
         if (currentLevelId === LEVELS.length) {
-           if (status !== GameStatus.VICTORY) {
+           if (victoryAnimStart.current === 0) {
              onPlaySound('victory');
              victoryAnimStart.current = Date.now();
              triggerHaptic([100, 50, 100, 50, 200]);
+             onLevelNameChange("Union"); // Level 10 Name Reveal
              onGameWon();
            }
         } else {
@@ -851,9 +896,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         }
       }
 
-      // Fix: Increase void threshold to allow vertical moving platforms to go lower without killing the player
+      // Updated void death threshold to allow vertical platforms to dip lower
       if (pos.y > level.height + 1000) {
-        takeDamage(0, undefined, 'void'); // Void drains all
+        takeDamage(0, undefined, 'void'); 
       }
       
       const targetEyeX = vel.x * 2;
@@ -888,9 +933,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       if (p.life <= 0) particles.current.splice(i, 1);
     }
     
-    // Slow Mirage Fade
     if (triggeredMirageId.current) {
-        mirageFadeAlpha.current -= 0.005; // Very slow fade
+        mirageFadeAlpha.current -= 0.005; 
         if (mirageFadeAlpha.current < 0) mirageFadeAlpha.current = 0;
     }
 
@@ -900,7 +944,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
        spawnParticles(cx + Math.random() * 800, cy + Math.random() * 600, '#fff', 1, 'bird');
     }
 
-  }, [status, keys, touchInput, onGameOver, onLevelComplete, onGameWon, settings.haptics, onUpdateMood, currentLevelId, onCheckpointSave, onPlaySound, takeDamage, onTutorialUpdate]);
+  }, [status, keys, touchInput, onGameOver, onLevelComplete, onGameWon, settings.haptics, onUpdateMood, currentLevelId, onCheckpointSave, onPlaySound, takeDamage, onTutorialUpdate, onLevelNameChange]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -915,7 +959,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     let shakeX = 0;
     let shakeY = 0;
     
-    // Shake on Void Death or Panic Mode
     if ((deathCause.current === 'void' && respawnTimer.current > 30 && respawnTimer.current < 60) || reversedControlsTimer.current > 0) {
         shakeX = (Math.random() - 0.5) * 5;
         shakeY = (Math.random() - 0.5) * 5;
@@ -927,11 +970,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
        const duration = 20000; 
        const elapsed = Math.min((Date.now() - victoryAnimStart.current), duration);
        const t = elapsed / duration;
+       // OVERDRAW for grey area fix
        const cx = cameraPos.current.x;
        const cy = cameraPos.current.y;
        
-       // Fix: Draw huge background rect to avoid grey areas during camera shake/move
-       // We center it on the camera and make it massive
        const bgX = cx - 2000; 
        const bgY = cy - 2000;
        const bgW = 4800;
@@ -952,9 +994,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           bgGradient.addColorStop(1, `rgb(${252 - subT * 33}, ${211 + subT * 23}, ${77 + subT * 177})`);
        }
        ctx.fillStyle = bgGradient;
-       ctx.fillRect(bgX, bgY, bgW, bgH); // Draw overdraw rect
+       ctx.fillRect(bgX, bgY, bgW, bgH); 
 
-       // ... Draw Sun, Clouds, Flowers ...
        if (t > 0.2) {
           const sunT = (t - 0.2) / 0.8;
           const sunY = cy + 500 - (sunT * 400); 
@@ -989,6 +1030,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
        }
 
     } else {
+       // Normal background
        bgGradient = ctx.createLinearGradient(cameraPos.current.x, cameraPos.current.y, cameraPos.current.x, cameraPos.current.y + 600);
        if (levelRef.current.id >= LEVELS.length) {
           bgGradient.addColorStop(0, '#000000');
@@ -1016,9 +1058,18 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
     levelRef.current.entities.forEach(ent => {
       if (ent.type === EntityType.PLATFORM || ent.type === EntityType.MOVING_PLATFORM) {
-        ctx.fillStyle = ent.color;
-        ctx.shadowBlur = 10;
-        ctx.shadowColor = ent.glowColor || '#000';
+        if (status === GameStatus.VICTORY) {
+            // Render as magical ground (Grass/Earth)
+            const g = ctx.createLinearGradient(0, ent.pos.y, 0, ent.pos.y + ent.size.y);
+            g.addColorStop(0, '#4ade80'); // Green 400
+            g.addColorStop(1, '#14532d'); // Green 900
+            ctx.fillStyle = g;
+            ctx.shadowBlur = 0;
+        } else {
+            ctx.fillStyle = ent.color;
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = ent.glowColor || '#000';
+        }
         ctx.fillRect(ent.pos.x, ent.pos.y, ent.size.x, ent.size.y);
         ctx.shadowBlur = 0;
       } 
@@ -1059,7 +1110,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         ctx.restore();
       }
       else if (ent.type === EntityType.EVIL_PILL) {
-        if (triggeredEvilPillIds.current.has(ent.id)) return; // Don't draw if triggered
+        if (triggeredEvilPillIds.current.has(ent.id)) return; 
         ctx.shadowBlur = 20;
         ctx.shadowColor = '#ff0000';
         ctx.fillStyle = COLOR_EVIL_PILL;
@@ -1109,7 +1160,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       }
       else if (ent.type === EntityType.MIRAGE_NPC) {
         if (triggeredMirageId.current !== ent.id || mirageFadeAlpha.current > 0.01) {
-             // Draw Mirage NPC with Portal Effect
             ctx.globalAlpha = triggeredMirageId.current === ent.id ? mirageFadeAlpha.current : 1.0;
             ctx.shadowBlur = 30;
             ctx.shadowColor = COLOR_PORTAL_GLOW;
@@ -1120,7 +1170,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             ctx.shadowBlur = 20;
             ctx.shadowColor = COLOR_GOAL_GLOW;
             ctx.fillStyle = COLOR_NPC;
-            // Pulse logic
             const pulse = triggeredMirageId.current === ent.id ? 0 : Math.sin(globalTime.current * 5) * 0.2;
             ctx.globalAlpha = triggeredMirageId.current === ent.id ? mirageFadeAlpha.current : 0.8 + pulse;
             ctx.beginPath(); ctx.arc(ent.pos.x, ent.pos.y, 12, 0, Math.PI * 2); ctx.fill();
@@ -1130,7 +1179,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       }
     });
 
-    // Projectiles
     projectiles.current.forEach(p => {
         ctx.shadowBlur = 5;
         ctx.shadowColor = COLOR_PROJECTILE;
@@ -1139,7 +1187,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         ctx.shadowBlur = 0;
     });
 
-    // Goal/Portal
     const goal = levelRef.current.goalPos;
     ctx.save();
     ctx.translate(goal.x, goal.y);
@@ -1150,7 +1197,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         ctx.shadowBlur = 30;
         ctx.shadowColor = COLOR_GOAL_GLOW;
         ctx.fillStyle = COLOR_GOAL;
-        // FINAL LEVEL: Goal size same as player (10)
         ctx.beginPath(); ctx.arc(0, 0, 10, 0, Math.PI * 2); ctx.fill();
         ctx.fillStyle = '#fff'; ctx.fillRect(-3, -2, 2, 2); ctx.fillRect(1, -2, 2, 2);
       }
@@ -1187,7 +1233,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       } 
       else if (health.current > 0 || healthDrainActive.current) {
         if (invulnerableFrames.current <= 0 || Math.floor(globalTime.current * 10) % 2 !== 0) {
-            // Player Color logic (Normal vs Evil)
             const isEvil = reversedControlsTimer.current > 0;
             ctx.shadowBlur = 20;
             ctx.shadowColor = isEvil ? COLOR_PLAYER_EVIL_GLOW : COLOR_PLAYER_GLOW;

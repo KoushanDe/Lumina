@@ -1,10 +1,11 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GameCanvas } from './components/GameCanvas';
-import { GameStatus, GameSettings, ControlScheme, TutorialState, PlayerDatabase, PlayerProfile } from './types';
-import { LEVELS, WISDOM_QUOTES } from './constants';
+import { GameStatus, GameSettings, ControlScheme, TutorialState, PlayerDatabase, PlayerProfile, CheckpointData } from './types';
+import { LEVELS, WISDOM_QUOTES, DEATH_QUOTES } from './constants';
 import { generateLevelNarrative } from './services/geminiService';
-import { Play, RotateCcw, Heart, Settings, X, Volume2, VolumeX, Music, HelpCircle, Map, Gamepad2, Smartphone, Home, ChevronLeft, ChevronRight, Anchor, Pause, BookOpen, User, ExternalLink, Coffee, Info, LogIn, Key, Sparkles, Copy, LogOut } from 'lucide-react';
+import { Play, RotateCcw, Heart, Settings, X, Volume2, VolumeX, Music, HelpCircle, Map, Gamepad2, Smartphone, Home, ChevronLeft, ChevronRight, Anchor, Pause, BookOpen, User, ExternalLink, Coffee, Info, LogIn, Key, Sparkles, Copy, LogOut, Save, Check } from 'lucide-react';
+import { LuminaAvatar } from './components/LuminaAvatar';
 
 const App: React.FC = () => {
   // Game State - Start at MENU by default
@@ -16,13 +17,17 @@ const App: React.FC = () => {
   const [authInput, setAuthInput] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
   const [newPlayerId, setNewPlayerId] = useState<string | null>(null);
+  const [hasCopiedId, setHasCopiedId] = useState(false); // State for copy button feedback
 
   // Gameplay State
   const [levelId, setLevelId] = useState(1);
+  const [displayLevelName, setDisplayLevelName] = useState(""); // Dynamic Level Name
+
   const [narrative, setNarrative] = useState<string>("");
   const [loadingStory, setLoadingStory] = useState(false);
   
-  const [maxReachedLevel, setMaxReachedLevel] = useState(1);
+  const [maxReachedLevel, setMaxReachedLevel] = useState(1); // Locked by default
+  const [currentCheckpoint, setCurrentCheckpoint] = useState<CheckpointData | null>(null);
 
   const [showSettings, setShowSettings] = useState(false);
   const [showObjective, setShowObjective] = useState(false);
@@ -31,7 +36,7 @@ const App: React.FC = () => {
   const [showCredits, setShowCredits] = useState(false);
 
   const [settings, setSettings] = useState<GameSettings>({
-    musicVolume: 0.4,
+    musicVolume: 0.25, // Default set to 25%
     sfxVolume: 0.5,
     haptics: true,
     controlScheme: 'keyboard'
@@ -47,10 +52,20 @@ const App: React.FC = () => {
   const [activeTutorialMessage, setActiveTutorialMessage] = useState<string | null>(null);
 
   const journeyScrollRef = useRef<HTMLDivElement>(null);
+  const menuCanvasRef = useRef<HTMLCanvasElement>(null);
 
   const [mood, setMood] = useState<'curious' | 'calm' | 'hopeful' | 'tense'>('curious');
   const deathCountRef = useRef(0);
   const wisdomThreshold = useRef(Math.floor(Math.random() * 5) + 6); 
+  const lastCalmTriggerTime = useRef(0);
+
+  const bgmFadeVolume = useRef(0); // Ref for fading in music
+
+  // --- AUDIO ENGINE REFS ---
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const delayNodeRef = useRef<DelayNode | null>(null);
+  const bgmIntervalRef = useRef<number | null>(null);
+  const seqStepRef = useRef<number>(0);
 
   // --- DATABASE HELPERS ---
   const getDatabase = (): PlayerDatabase => {
@@ -71,7 +86,42 @@ const App: React.FC = () => {
     return result;
   };
 
+  // --- AUDIO UNLOCK (BROWSER POLICY FIX) ---
+  useEffect(() => {
+    const unlockAudio = () => {
+      if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+        audioCtxRef.current.resume().then(() => {
+           // Audio resumed successfully
+        }).catch(err => console.error(err));
+      }
+    };
+
+    // Listen for any user interaction to unlock audio
+    window.addEventListener('click', unlockAudio);
+    window.addEventListener('touchstart', unlockAudio);
+    window.addEventListener('keydown', unlockAudio);
+
+    return () => {
+      window.removeEventListener('click', unlockAudio);
+      window.removeEventListener('touchstart', unlockAudio);
+      window.removeEventListener('keydown', unlockAudio);
+    };
+  }, []);
+
+  // Update display name when level changes
+  useEffect(() => {
+    const l = LEVELS.find(lvl => lvl.id === levelId);
+    if (l) setDisplayLevelName(l.name);
+  }, [levelId]);
+
   // --- AUTH LOGIC ---
+  useEffect(() => {
+    if (showAuth) {
+      setAuthError(null);
+      setAuthInput("");
+    }
+  }, [showAuth]);
+
   const handleLogin = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     const id = authInput.trim().toUpperCase();
@@ -79,17 +129,32 @@ const App: React.FC = () => {
 
     const db = getDatabase();
     if (db[id]) {
-      // Found
       setPlayerId(id);
-      setMaxReachedLevel(db[id].maxReachedLevel);
+      
+      if (db[id].maxReachedLevel > maxReachedLevel) {
+          setMaxReachedLevel(db[id].maxReachedLevel);
+      } else {
+          setMaxReachedLevel(Math.max(db[id].maxReachedLevel, maxReachedLevel));
+      }
+      
+      if (db[id].currentCheckpoint) {
+          setCurrentCheckpoint(db[id].currentCheckpoint);
+      } else {
+          setCurrentCheckpoint(null);
+      }
+
       setSettings(db[id].settings);
       setAuthError(null);
-      // Update last played
+      
       db[id].lastPlayed = Date.now();
+      // Update DB with unlocked state if we want to save it, or keep local state only
+      if (maxReachedLevel > db[id].maxReachedLevel) {
+         db[id].maxReachedLevel = maxReachedLevel;
+      }
       saveDatabase(db);
-      // Cache current session
+      
       localStorage.setItem('lumina_current_player', id);
-      setShowAuth(false); // Close modal
+      setShowAuth(false); 
     } else {
       setAuthError("Soul ID not found in the void.");
     }
@@ -98,11 +163,12 @@ const App: React.FC = () => {
   const handleCreateAccount = () => {
     const db = getDatabase();
     let newId = generateId();
-    while (db[newId]) newId = generateId(); // Ensure unique
+    while (db[newId]) newId = generateId(); 
 
     const newProfile: PlayerProfile = {
       id: newId,
-      maxReachedLevel: 1,
+      maxReachedLevel: maxReachedLevel, 
+      currentCheckpoint: currentCheckpoint,
       settings: settings,
       created: Date.now(),
       lastPlayed: Date.now()
@@ -112,10 +178,9 @@ const App: React.FC = () => {
     saveDatabase(db);
     
     setPlayerId(newId);
-    setNewPlayerId(newId); // Trigger modal
-    setMaxReachedLevel(1);
+    setNewPlayerId(newId); 
+    setHasCopiedId(false); 
     localStorage.setItem('lumina_current_player', newId);
-    // Don't close Auth immediately, show the new ID modal on top or within auth
     setShowAuth(false);
   };
 
@@ -123,9 +188,25 @@ const App: React.FC = () => {
     setPlayerId(null);
     setNewPlayerId(null);
     setAuthInput("");
-    setMaxReachedLevel(1); // Reset local progress view
+    setMaxReachedLevel(1); 
+    setCurrentCheckpoint(null);
     localStorage.removeItem('lumina_current_player');
     setShowSettings(false);
+  };
+  
+  const handleCopyId = async () => {
+      if (newPlayerId) {
+          try {
+              await navigator.clipboard.writeText(newPlayerId);
+              setHasCopiedId(true);
+          } catch (err) {
+              console.error("Failed to copy", err);
+          }
+      }
+  };
+  
+  const handleCloseNewId = () => {
+      setNewPlayerId(null);
   };
 
   // --- PERSISTENCE ---
@@ -134,20 +215,27 @@ const App: React.FC = () => {
     const db = getDatabase();
     if (db[playerId]) {
       db[playerId].maxReachedLevel = maxReachedLevel;
+      db[playerId].currentCheckpoint = currentCheckpoint; 
       db[playerId].settings = settings;
       db[playerId].lastPlayed = Date.now();
       saveDatabase(db);
     }
   };
 
+  const handleCheckpointSave = (data: CheckpointData) => {
+      setCurrentCheckpoint(data);
+      setCheckpointToast(true);
+      deathCountRef.current = 0; // Reset death count on checkpoint so we only track repeated deaths per segment
+  };
+
   useEffect(() => {
-    // Check for auto-login on mount
     const cachedId = localStorage.getItem('lumina_current_player');
     if (cachedId) {
       const db = getDatabase();
       if (db[cachedId]) {
          setPlayerId(cachedId);
-         setMaxReachedLevel(db[cachedId].maxReachedLevel);
+         setMaxReachedLevel(db[cachedId].maxReachedLevel); 
+         if (db[cachedId].currentCheckpoint) setCurrentCheckpoint(db[cachedId].currentCheckpoint);
          setSettings(db[cachedId].settings);
       }
     }
@@ -155,11 +243,11 @@ const App: React.FC = () => {
 
   useEffect(() => {
     saveProgress();
-  }, [maxReachedLevel, settings]);
+  }, [maxReachedLevel, settings, currentCheckpoint]);
 
   useEffect(() => {
     if (wisdomToast) {
-      const t = setTimeout(() => setWisdomToast(null), 5000);
+      const t = setTimeout(() => setWisdomToast(null), 8000); 
       return () => clearTimeout(t);
     }
   }, [wisdomToast]);
@@ -171,18 +259,92 @@ const App: React.FC = () => {
     }
   }, [checkpointToast]);
 
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const delayNodeRef = useRef<DelayNode | null>(null);
-  const bgmIntervalRef = useRef<number | null>(null);
-  const seqStepRef = useRef<number>(0);
+  // --- MENU BACKGROUND ANIMATION ---
+  useEffect(() => {
+    if (status === GameStatus.MENU) {
+      const canvas = menuCanvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      let width = window.innerWidth;
+      let height = window.innerHeight;
+      canvas.width = width;
+      canvas.height = height;
+
+      const stars: any[] = [];
+      for(let i=0; i<150; i++) {
+        stars.push({
+          x: Math.random() * width,
+          y: Math.random() * height,
+          size: Math.random() * 2 + 0.5,
+          alpha: Math.random() * 0.5 + 0.2,
+          speed: Math.random() * 0.3 + 0.1
+        });
+      }
+
+      let animId = 0;
+      const render = () => {
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, width, height);
+
+        const grad = ctx.createRadialGradient(width/2, height/2, 0, width/2, height/2, width);
+        grad.addColorStop(0, '#0c4a6e'); 
+        grad.addColorStop(0.4, '#000000');
+        grad.addColorStop(1, '#000000');
+        ctx.fillStyle = grad;
+        ctx.globalAlpha = 0.3;
+        ctx.fillRect(0, 0, width, height);
+        ctx.globalAlpha = 1.0;
+
+        ctx.fillStyle = '#ffffff';
+        stars.forEach(star => {
+          star.y -= star.speed; 
+          if (star.y < 0) {
+            star.y = height;
+            star.x = Math.random() * width;
+          }
+          ctx.globalAlpha = star.alpha;
+          ctx.beginPath();
+          ctx.arc(star.x, star.y, star.size, 0, Math.PI*2);
+          ctx.fill();
+        });
+        ctx.globalAlpha = 1.0;
+
+        animId = requestAnimationFrame(render);
+      };
+      
+      render();
+
+      const handleResize = () => {
+         width = window.innerWidth;
+         height = window.innerHeight;
+         canvas.width = width;
+         canvas.height = height;
+      };
+      window.addEventListener('resize', handleResize);
+
+      return () => {
+        cancelAnimationFrame(animId);
+        window.removeEventListener('resize', handleResize);
+      }
+    }
+  }, [status]);
+
+  // --- AUDIO ENGINE ---
   
   const HARP_SCALES = useRef({
-    menu: [196.00, 261.63, 311.13, 392.00, 523.25], // Cm Pentatonic - Mystical
+    menu: [196.00, 261.63, 311.13, 392.00, 523.25], 
     curious: [196.00, 220.00, 261.63, 293.66, 349.23, 392.00], 
     tense: [164.81, 185.00, 233.08, 261.63], 
     calm: [130.81, 164.81, 196.00, 261.63], 
     hopeful: [349.23, 392.00, 440.00, 493.88, 523.25, 587.33, 659.25, 698.46] 
   }).current;
+
+  // Reset fade volume on status change to ensure gentle transition
+  useEffect(() => {
+    bgmFadeVolume.current = 0;
+  }, [status]);
 
   const initAudio = () => {
     if (!audioCtxRef.current) {
@@ -211,8 +373,11 @@ const App: React.FC = () => {
       
       delayNodeRef.current = delay;
     }
+    
+    // Check state and try to resume if suspended (but don't force it here, the global listener handles it)
     if (audioCtxRef.current.state === 'suspended') {
-      audioCtxRef.current.resume();
+      // Just a gentle nudge attempt
+      audioCtxRef.current.resume().catch(() => {});
     }
   };
 
@@ -224,7 +389,7 @@ const App: React.FC = () => {
 
     const masterGain = ctx.createGain();
     masterGain.gain.setValueAtTime(0, now);
-    masterGain.gain.linearRampToValueAtTime(volume * settings.musicVolume * 0.5, now + 0.02); 
+    masterGain.gain.linearRampToValueAtTime(volume * settings.musicVolume * 0.5, now + 0.05); 
     masterGain.gain.exponentialRampToValueAtTime(0.001, now + duration);
     
     masterGain.connect(dest);
@@ -252,7 +417,6 @@ const App: React.FC = () => {
     const ctx = audioCtxRef.current;
     const now = ctx.currentTime;
     
-    // Create dissonant loop
     const osc = ctx.createOscillator();
     osc.type = 'sawtooth';
     osc.frequency.setValueAtTime(100 + Math.random() * 500, now);
@@ -271,33 +435,32 @@ const App: React.FC = () => {
   const playBgmStep = useCallback(() => {
     if (status !== GameStatus.PLAYING && status !== GameStatus.VICTORY && status !== GameStatus.GAME_OVER && status !== GameStatus.MENU) return;
     
+    // CRITICAL FIX: If audio context is suspended (waiting for interaction), do not run sequencer or increment fade
+    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') return;
+
     if (isChaosMode) {
         playChaosSound();
         return;
     }
 
+    if (bgmFadeVolume.current < 1.0) {
+        bgmFadeVolume.current = Math.min(1.0, bgmFadeVolume.current + 0.02); 
+    }
+    const fade = bgmFadeVolume.current;
+    
+    if (fade < 0.05) return;
+
     seqStepRef.current = (seqStepRef.current + 1) % 32;
     const step = seqStepRef.current;
 
-    // --- MAIN MENU MUSIC ---
     if (status === GameStatus.MENU) {
         const scale = HARP_SCALES.menu;
-        // Slow, ambient, mystical pattern
-        if (step % 8 === 0) {
-            // Root note
-            playHarpNote(scale[0], 0.2, 4.0);
-        }
-        if (step % 16 === 4) {
-             // 5th or Octave
-             playHarpNote(scale[3], 0.15, 3.0);
-        }
-        if (step % 32 === 24) {
-            // High shimmer
-            playHarpNote(scale[4] * 2, 0.1, 5.0);
-        }
+        if (step % 8 === 0) playHarpNote(scale[0], 0.2 * fade, 4.0);
+        if (step % 16 === 4) playHarpNote(scale[3], 0.15 * fade, 3.0);
+        if (step % 32 === 24) playHarpNote(scale[4] * 2, 0.1 * fade, 5.0);
         if (Math.random() < 0.1 && step % 4 === 0) {
             const rNote = scale[Math.floor(Math.random() * scale.length)];
-            playHarpNote(rNote * 2, 0.05, 2.0);
+            playHarpNote(rNote * 2, 0.05 * fade, 2.0);
         }
         return;
     }
@@ -305,14 +468,13 @@ const App: React.FC = () => {
     if (status === GameStatus.VICTORY) {
        const scale = HARP_SCALES.hopeful;
        const noteIdx = [0, 2, 4, 7, 8, 7, 4, 2]; 
-       
        if (step % 2 === 0) {
           const idx = (step / 2) % noteIdx.length;
           const note = scale[noteIdx[idx] % scale.length] * (noteIdx[idx] >= scale.length ? 2 : 1);
-          playHarpNote(note, 0.25, 3.0);
+          playHarpNote(note, 0.25 * fade, 3.0);
        }
-       if (step % 16 === 0) playHarpNote(scale[0]/2, 0.3, 6.0);
-       if (step % 8 === 0) playHarpNote(scale[0]*2, 0.1, 4.0);
+       if (step % 16 === 0) playHarpNote(scale[0]/2, 0.3 * fade, 6.0);
+       if (step % 8 === 0) playHarpNote(scale[0]*2, 0.1 * fade, 4.0);
        return;
     }
 
@@ -320,40 +482,48 @@ const App: React.FC = () => {
        const scale = HARP_SCALES.tense;
        if (step % 4 === 0) {
           const note = scale[Math.floor(Math.random() * scale.length)];
-          playHarpNote(note, 0.25, 1.0);
+          playHarpNote(note, 0.25 * fade, 1.0);
        }
-       if (step % 16 === 0) playHarpNote(scale[0] / 2, 0.3, 2.0); 
+       if (step % 16 === 0) playHarpNote(scale[0] / 2, 0.3 * fade, 2.0); 
     }
     else if (mood === 'curious') {
        if (Math.random() < 0.15 && step % 2 === 0) {
           const scale = HARP_SCALES.curious;
           const note = scale[Math.floor(Math.random() * scale.length)];
           const octave = Math.random() > 0.7 ? 2 : 1;
-          playHarpNote(note * octave, 0.3, 3.0);
+          playHarpNote(note * octave, 0.3 * fade, 3.0);
        }
     } 
     else if (mood === 'calm') {
        if (step % 16 === 0) {
           const scale = HARP_SCALES.calm;
-          playHarpNote(scale[0], 0.3, 5.0);
-          setTimeout(() => playHarpNote(scale[2], 0.2, 5.0), 200); 
+          // Play a slow chord (Root + Third) to be more noticeable and soothing
+          playHarpNote(scale[0], 0.3 * fade, 6.0);
+          setTimeout(() => playHarpNote(scale[2], 0.25 * fade, 5.0), 100); 
+       }
+       if (step % 16 === 8) {
+          const scale = HARP_SCALES.calm;
+          playHarpNote(scale[1], 0.2 * fade, 4.0);
        }
     }
     else if (mood === 'hopeful') {
        const scale = HARP_SCALES.hopeful;
        if (step % 4 === 0) {
           const idx = (step / 4) % scale.length;
-          playHarpNote(scale[idx], 0.25, 2.5);
+          playHarpNote(scale[idx], 0.25 * fade, 2.5);
        }
-       if (step % 16 === 0) playHarpNote(scale[0]/2, 0.25, 4.0);
+       if (step % 16 === 0) playHarpNote(scale[0]/2, 0.25 * fade, 4.0);
     }
   }, [mood, status, playHarpNote, HARP_SCALES, isChaosMode, playChaosSound]);
 
   const startBgm = () => {
     stopBgm();
+    // CRITICAL FIX: Reset fade volume to 0 so it ramps up from silence every time music starts
+    bgmFadeVolume.current = 0; 
+    
     if (settings.musicVolume <= 0) return;
     initAudio();
-    bgmIntervalRef.current = window.setInterval(playBgmStep, isChaosMode ? 100 : 150); // Faster during chaos
+    bgmIntervalRef.current = window.setInterval(playBgmStep, isChaosMode ? 100 : 150); 
   };
 
   const stopBgm = () => {
@@ -419,6 +589,8 @@ const App: React.FC = () => {
        gain.gain.exponentialRampToValueAtTime(0.001, now + 2.5); 
        osc.start(now); osc.stop(now + 2.5);
     } else if (type === 'pill') {
+       // SILENT for death quotes, but this case is generic.
+       // Handled in handlePlayerDied logic. Here we play sound.
        const baseFreq = 600;
        [0, 1, 2, 3].forEach((i) => {
            const tOsc = ctx.createOscillator();
@@ -487,14 +659,34 @@ const App: React.FC = () => {
     }
   };
 
+  const handlePlayerDied = useCallback(() => {
+    deathCountRef.current += 1;
+    
+    // Check if threshold reached for wisdom
+    if (deathCountRef.current >= wisdomThreshold.current) {
+        // Use DEATH_QUOTES specifically for death screens/popups
+        const quote = DEATH_QUOTES[Math.floor(Math.random() * DEATH_QUOTES.length)];
+        setWisdomToast(quote);
+        // NO SOUND for death quotes as requested
+        
+        // Trigger Calm mood ONLY when quote is shown
+        setMood('calm');
+        lastCalmTriggerTime.current = Date.now();
+
+        // Increase threshold for next time
+        wisdomThreshold.current += Math.floor(Math.random() * 5) + 6;
+    }
+  }, []);
+
   const handleStartNew = () => {
     initAudio();
     setLevelId(1);
+    setCurrentCheckpoint(null); 
     setStatus(GameStatus.PLAYING);
     setMood('curious');
     deathCountRef.current = 0;
     setHealth(1.0);
-    setResetKey(0);
+    setResetKey(Date.now());
     setIsChaosMode(false);
   };
   
@@ -504,12 +696,18 @@ const App: React.FC = () => {
       return;
     }
     initAudio();
-    setLevelId(maxReachedLevel);
+
+    if (currentCheckpoint && currentCheckpoint.levelId > 0) {
+        setLevelId(currentCheckpoint.levelId);
+    } else {
+        setLevelId(maxReachedLevel);
+        setCurrentCheckpoint(null); 
+    }
+
     setStatus(GameStatus.PLAYING);
     setMood('curious');
     deathCountRef.current = 0;
-    setHealth(1.0);
-    setResetKey(0);
+    setResetKey(Date.now()); 
     setIsChaosMode(false);
   };
 
@@ -518,9 +716,10 @@ const App: React.FC = () => {
   };
 
   const handleRestartLevel = () => {
-    setResetKey(prev => prev + 1);
+    setResetKey(Date.now());
     setStatus(GameStatus.PLAYING);
     setHealth(1.0);
+    setCurrentCheckpoint(null); 
     setMood('curious');
     deathCountRef.current = 0;
     setIsChaosMode(false);
@@ -529,16 +728,7 @@ const App: React.FC = () => {
   const handleGameOver = () => {
     setStatus(GameStatus.GAME_OVER);
     setIsChaosMode(false);
-    deathCountRef.current += 1;
-    
-    if (deathCountRef.current >= wisdomThreshold.current) {
-        const quote = WISDOM_QUOTES[Math.floor(Math.random() * WISDOM_QUOTES.length)];
-        setWisdomToast(quote);
-        playSound('pill'); 
-        wisdomThreshold.current += Math.floor(Math.random() * 5) + 6;
-    }
-
-    if (deathCountRef.current > 2) setMood('calm');
+    // Note: death counting is now handled by handlePlayerDied during the game loop
   };
 
   const handleRetry = () => {
@@ -555,6 +745,9 @@ const App: React.FC = () => {
   const handleLevelComplete = async () => {
     const nextId = levelId + 1;
     if (nextId > maxReachedLevel) setMaxReachedLevel(nextId);
+    
+    setCurrentCheckpoint(null);
+
     deathCountRef.current = 0;
     setMood('curious');
     setIsChaosMode(false);
@@ -576,7 +769,7 @@ const App: React.FC = () => {
   const handleNextLevel = () => {
     setLevelId(prev => prev + 1);
     setStatus(GameStatus.PLAYING);
-    setResetKey(0);
+    setResetKey(Date.now());
   };
 
   const handleVictory = async () => {
@@ -586,6 +779,7 @@ const App: React.FC = () => {
     const text = await generateLevelNarrative("Paradise", true);
     setNarrative(text);
     setLoadingStory(false);
+    setCurrentCheckpoint(null);
   };
 
   const handleMoodUpdate = (distanceToGoal: number, distanceToMonster: number) => {
@@ -596,8 +790,20 @@ const App: React.FC = () => {
      } else if (distanceToGoal < 1000) { 
         if (mood !== 'hopeful') setMood('hopeful');
      } else {
-        if (mood === 'tense' || mood === 'hopeful') {
-           setMood(deathCountRef.current > 2 ? 'calm' : 'curious');
+        if (mood === 'calm') {
+            // Check if calm should expire (20s)
+            if (Date.now() - lastCalmTriggerTime.current > 20000) {
+                setMood('curious');
+                // Optional: We can reset deathCount here to stop it from immediately triggering calm again
+                // deathCountRef.current = 0; 
+            }
+        } else if (mood === 'tense' || mood === 'hopeful') {
+           // Return to previous state
+           if (deathCountRef.current > 2 && (Date.now() - lastCalmTriggerTime.current < 20000)) {
+               setMood('calm');
+           } else {
+               setMood('curious');
+           }
         }
      }
   };
@@ -636,20 +842,20 @@ const App: React.FC = () => {
   const currentLevel = LEVELS.find(l => l.id === levelId);
 
   return (
-    <div className="min-h-screen bg-zinc-950 flex flex-col items-center justify-center p-4 font-sans text-white overflow-hidden relative selection:bg-cyan-500/30">
+    <div className="h-[100dvh] w-full bg-zinc-950 flex flex-col items-center justify-center p-4 font-sans text-white overflow-hidden relative selection:bg-cyan-500/30">
       <div className={`absolute top-4 left-0 right-0 flex justify-between px-8 pointer-events-none transition-opacity duration-1000 ${status === GameStatus.VICTORY ? 'opacity-0' : 'opacity-100'} z-40`}>
         <div className="text-left flex flex-col gap-2 pointer-events-auto">
            <div>
              {status === GameStatus.PLAYING ? (
                <>
-                 <h1 className="text-xl font-bold tracking-widest text-cyan-400" style={{ fontFamily: 'Orbitron, sans-serif', textShadow: '0 0 10px cyan' }}>
-                   {currentLevel?.name.toUpperCase()}
+                 <h1 className="text-lg md:text-xl font-bold tracking-widest text-cyan-400" style={{ fontFamily: 'Orbitron, sans-serif', textShadow: '0 0 10px cyan' }}>
+                   {displayLevelName.toUpperCase()}
                  </h1>
                  <p className="text-[10px] text-gray-500 tracking-widest uppercase">LEVEL {levelId}</p>
                </>
              ) : (
                <>
-                 <h1 className="text-xl font-bold tracking-widest text-cyan-400" style={{ fontFamily: 'Orbitron, sans-serif', textShadow: '0 0 10px cyan' }}>LUMINA</h1>
+                 <h1 className="text-lg md:text-xl font-bold tracking-widest text-cyan-400" style={{ fontFamily: 'Orbitron, sans-serif', textShadow: '0 0 10px cyan' }}>LUMINA</h1>
                  {playerId ? (
                    <p className="text-[10px] text-gray-500 tracking-widest uppercase">SOUL ID: <span className="text-gray-300 font-mono">{playerId}</span></p>
                  ) : (
@@ -665,21 +871,30 @@ const App: React.FC = () => {
       </div>
 
       <div className="absolute top-4 right-4 flex gap-2 z-50">
+        <a 
+          href="https://buymeacoffee.com/koushan" 
+          target="_blank" 
+          rel="noopener noreferrer"
+          className="p-2 bg-yellow-400/10 text-yellow-400 hover:bg-yellow-400/20 border border-yellow-400/30 rounded-full transition flex items-center justify-center"
+          title="Buy me a coffee"
+        >
+          <Coffee size={20} />
+        </a>
+        <button onClick={() => setShowStory(true)} className="p-2 bg-zinc-900/50 text-cyan-500 hover:text-cyan-300 hover:bg-zinc-800 rounded-full transition border border-zinc-700"><BookOpen size={20} /></button>
         {status === GameStatus.PLAYING && (
           <button onClick={handlePause} className="p-2 bg-zinc-900/50 text-cyan-500 hover:text-cyan-300 hover:bg-zinc-800 rounded-full transition border border-zinc-700">
              <Pause size={20} />
           </button>
         )}
-        <button onClick={() => setShowStory(true)} className="p-2 bg-zinc-900/50 text-cyan-500 hover:text-cyan-300 hover:bg-zinc-800 rounded-full transition border border-zinc-700"><BookOpen size={20} /></button>
         <button onClick={() => setShowObjective(true)} className="p-2 bg-zinc-900/50 text-cyan-500 hover:text-cyan-300 hover:bg-zinc-800 rounded-full transition border border-zinc-700"><HelpCircle size={20} /></button>
         <button onClick={() => setShowSettings(true)} className="p-2 bg-zinc-900/50 text-cyan-500 hover:text-cyan-300 hover:bg-zinc-800 rounded-full transition border border-zinc-700"><Settings size={20} /></button>
       </div>
 
       {wisdomToast && (
-        <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-4 fade-in duration-500">
-           <div className="bg-cyan-950/90 border border-cyan-500/50 px-6 py-3 rounded-full shadow-[0_0_30px_rgba(0,255,255,0.2)] flex items-center gap-3">
-              <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse shadow-[0_0_10px_yellow]"></div>
-              <span className="text-cyan-100 text-sm font-serif italic">"{wisdomToast}"</span>
+        <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-4 fade-in duration-500 w-full max-w-sm px-4 flex justify-center text-center">
+           <div className="bg-cyan-950/90 border border-cyan-500/50 px-6 py-4 rounded-2xl shadow-[0_0_30px_rgba(0,255,255,0.2)] flex items-center justify-center gap-3 backdrop-blur-md">
+              <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse shadow-[0_0_10px_yellow] shrink-0"></div>
+              <span className="text-cyan-100 text-sm font-serif italic leading-relaxed text-center">{wisdomToast}</span>
            </div>
         </div>
       )}
@@ -692,10 +907,10 @@ const App: React.FC = () => {
         </div>
       )}
       {status === GameStatus.PLAYING && activeTutorialMessage && (
-        <div className="absolute bottom-32 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-4 fade-in duration-500 pointer-events-none">
-           <div className="bg-black/80 border border-cyan-500/50 px-6 py-3 rounded-full shadow-[0_0_20px_rgba(0,255,255,0.1)] flex items-center gap-3 backdrop-blur-md">
-              <Info size={16} className="text-cyan-400" />
-              <span className="text-cyan-100 text-sm font-bold tracking-wide">{activeTutorialMessage}</span>
+        <div className="absolute bottom-32 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-4 fade-in duration-500 pointer-events-none w-full max-w-sm px-4 flex justify-center">
+           <div className="bg-black/80 border border-cyan-500/50 px-6 py-3 rounded-full shadow-[0_0_20px_rgba(0,255,255,0.1)] flex items-center justify-center gap-3 backdrop-blur-md">
+              <Info size={16} className="text-cyan-400 shrink-0" />
+              <span className="text-cyan-100 text-sm font-bold tracking-wide text-center">{activeTutorialMessage}</span>
            </div>
         </div>
       )}
@@ -703,15 +918,26 @@ const App: React.FC = () => {
       {/* NEW PLAYER ID MODAL */}
       {newPlayerId && (
         <div className="absolute inset-0 bg-black/95 flex items-center justify-center z-[100] backdrop-blur-md">
-            <div className="bg-zinc-900 p-8 rounded-2xl border border-cyan-500 max-w-sm w-full text-center">
+            <div className="bg-zinc-900 p-8 rounded-2xl border border-cyan-500 max-w-sm w-full text-center m-4 relative">
+               <button onClick={handleCloseNewId} className="absolute top-4 right-4 text-gray-500 hover:text-white"><X size={20} /></button>
                <h2 className="text-2xl font-bold text-cyan-400 mb-2">SOUL BORN</h2>
                <p className="text-gray-400 text-sm mb-6">Keep this ID safe. It is the only way to return to this journey.</p>
                
                <div className="bg-black p-4 rounded-lg border border-zinc-800 mb-6 flex items-center justify-center gap-3">
                   <span className="text-3xl font-mono tracking-[0.2em] text-white">{newPlayerId}</span>
                </div>
-
-               <button onClick={() => setNewPlayerId(null)} className="w-full py-3 bg-cyan-900 hover:bg-cyan-800 text-white rounded font-bold uppercase tracking-wider transition">I Have Saved It</button>
+               
+               <div className="flex flex-col gap-3">
+                   {!hasCopiedId ? (
+                       <button onClick={handleCopyId} className="w-full py-3 bg-cyan-900 hover:bg-cyan-800 text-white rounded font-bold uppercase tracking-wider transition flex items-center justify-center gap-2">
+                           <Copy size={16} /> Copy Soul ID
+                       </button>
+                   ) : (
+                       <button onClick={handleCloseNewId} className="w-full py-3 bg-emerald-900 hover:bg-emerald-800 text-white rounded font-bold uppercase tracking-wider transition flex items-center justify-center gap-2 animate-in fade-in">
+                           <Check size={16} /> Copied!
+                       </button>
+                   )}
+               </div>
             </div>
         </div>
       )}
@@ -719,7 +945,7 @@ const App: React.FC = () => {
       {/* AUTH MODAL */}
       {showAuth && (
         <div className="absolute inset-0 bg-black/95 flex items-center justify-center z-50 backdrop-blur-md animate-in fade-in">
-           <div className="bg-zinc-900 p-8 rounded-2xl border border-zinc-700 max-w-md w-full relative">
+           <div className="bg-zinc-900 p-8 rounded-2xl border border-zinc-700 max-w-md w-full relative m-4">
               <button onClick={() => setShowAuth(false)} className="absolute top-4 right-4 text-gray-500 hover:text-white"><X size={20} /></button>
               <h2 className="text-center text-cyan-400 font-bold tracking-widest uppercase text-sm mb-6">Establish Connection</h2>
                
@@ -751,7 +977,15 @@ const App: React.FC = () => {
 
                   {/* New Player */}
                   <button onClick={handleCreateAccount} className="w-full py-4 bg-gradient-to-r from-indigo-900 to-purple-900 hover:from-indigo-800 hover:to-purple-800 border border-indigo-700 rounded-lg text-white font-bold tracking-wider uppercase text-xs flex items-center justify-center gap-2 transition-all shadow-[0_0_15px_rgba(79,70,229,0.2)] hover:shadow-[0_0_25px_rgba(79,70,229,0.4)]">
-                     <Sparkles size={16} /> Begin New Journey
+                     {maxReachedLevel > 1 ? (
+                         <>
+                             <Save size={16} /> Save Current Journey
+                         </>
+                     ) : (
+                         <>
+                             <Sparkles size={16} /> Create a Soul
+                         </>
+                     )}
                   </button>
                </div>
            </div>
@@ -768,14 +1002,14 @@ const App: React.FC = () => {
                 <div ref={journeyScrollRef} className="flex-1 overflow-x-auto scrollbar-hide snap-x snap-mandatory" style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}>
                   <div className="flex items-center px-8 py-12 relative min-w-max">
                     <div className="absolute top-1/2 left-0 right-0 h-1 bg-zinc-800 -z-0 translate-y-[-50%]"></div>
-                    {LEVELS.map((lvl) => {
+                    {LEVELS.filter(lvl => lvl.id <= maxReachedLevel).map((lvl) => {
                       const isUnlocked = lvl.id <= maxReachedLevel;
                       const isCurrent = lvl.id === maxReachedLevel;
                       const isLast = lvl.id === LEVELS.length;
                       return (
                         <div key={lvl.id} className="relative z-10 flex flex-col items-center gap-4 snap-center mx-6 min-w-[100px]">
                             <div 
-                              onClick={() => { if (isUnlocked) { setLevelId(lvl.id); setShowJourney(false); setStatus(GameStatus.PLAYING); setResetKey(0); }}}
+                              onClick={() => { if (isUnlocked) { setLevelId(lvl.id); setShowJourney(false); setStatus(GameStatus.PLAYING); setResetKey(Date.now()); }}}
                               className={`w-16 h-16 rounded-full border-2 flex items-center justify-center transition-all duration-300 cursor-pointer ${isCurrent ? 'bg-cyan-900 border-cyan-400 scale-125 shadow-[0_0_20px_cyan]' : isUnlocked ? 'bg-zinc-800 border-cyan-700 text-cyan-500 hover:bg-zinc-700' : 'bg-black border-zinc-800 text-zinc-800 cursor-not-allowed'}`}>
                               {isUnlocked ? (isCurrent ? <div className="w-4 h-4 bg-cyan-400 rounded-full animate-pulse"></div> : (isLast ? <Heart size={20} /> : <span className="text-lg font-bold">{lvl.id}</span>)) : <span className="opacity-30">?</span>}
                             </div>
@@ -793,7 +1027,7 @@ const App: React.FC = () => {
 
       {showObjective && (
         <div className="absolute inset-0 bg-black/90 flex items-center justify-center z-50 backdrop-blur-sm">
-           <div className="bg-zinc-900 p-8 rounded-2xl border border-cyan-900/50 max-w-lg w-full relative">
+           <div className="bg-zinc-900 p-8 rounded-2xl border border-cyan-900/50 max-w-lg w-full relative m-4">
              <button onClick={() => setShowObjective(false)} className="absolute top-4 right-4 text-gray-500 hover:text-white"><X size={20} /></button>
              <div className="mb-8 text-center"><h2 className="text-2xl font-bold text-cyan-400 mb-2">Guide</h2></div>
              <div className="grid grid-cols-2 gap-8 mb-8">
@@ -806,7 +1040,7 @@ const App: React.FC = () => {
                </div>
                <div className="space-y-4">
                  <h3 className="text-white font-bold uppercase tracking-wider text-xs mb-2">Controls</h3>
-                 {settings.controlScheme === 'keyboard' ? <div className="flex flex-col gap-4 items-center py-4"><p className="text-xs text-center text-gray-500">WASD / Arrows to Move & Jump</p></div> : <p className="text-xs text-center text-gray-500">Use On-screen Buttons</p>}
+                 {settings.controlScheme === 'keyboard' ? <div className="flex flex-col gap-4 items-center py-4"><p className="text-xs text-center text-gray-500">Move: WASD / Arrows<br/>Jump: Space / Up</p></div> : <p className="text-xs text-center text-gray-500">Use On-screen Buttons</p>}
                </div>
              </div>
              <div className="flex justify-center"><button onClick={() => setShowObjective(false)} className="px-6 py-2 bg-cyan-900 text-cyan-100 rounded hover:bg-cyan-800">Resume</button></div>
@@ -816,7 +1050,7 @@ const App: React.FC = () => {
       
       {showStory && (
         <div className="absolute inset-0 bg-black/90 flex items-center justify-center z-50 backdrop-blur-sm">
-           <div className="bg-zinc-900 p-8 rounded-2xl border border-cyan-900/50 max-w-xl w-full relative max-h-[80vh] overflow-y-auto">
+           <div className="bg-zinc-900 p-8 rounded-2xl border border-cyan-900/50 max-w-xl w-full relative max-h-[80vh] overflow-y-auto m-4">
              <button onClick={() => setShowStory(false)} className="absolute top-4 right-4 text-gray-500 hover:text-white"><X size={20} /></button>
              <div className="mb-8 text-center"><h2 className="text-2xl font-bold text-cyan-400 mb-2 font-serif tracking-widest">THE LEGEND OF LUMINA</h2></div>
              <div className="space-y-6 text-sm text-gray-300 font-serif leading-relaxed px-4">
@@ -843,7 +1077,7 @@ const App: React.FC = () => {
 
       {showSettings && (
         <div className="absolute inset-0 bg-black/90 flex items-center justify-center z-50 backdrop-blur-md">
-           <div className="bg-zinc-900 p-8 rounded-2xl border border-zinc-700 max-w-sm w-full shadow-2xl relative">
+           <div className="bg-zinc-900 p-8 rounded-2xl border border-zinc-700 max-w-sm w-full shadow-2xl relative m-4">
              <button onClick={() => setShowSettings(false)} className="absolute top-4 right-4 text-gray-500 hover:text-white"><X size={20} /></button>
              <h2 className="text-xl font-bold text-cyan-400 mb-8 text-center uppercase tracking-wider">Settings</h2>
              <div className="space-y-6">
@@ -876,14 +1110,15 @@ const App: React.FC = () => {
       
       {showCredits && (
         <div className="absolute inset-0 bg-black/90 flex items-center justify-center z-50 backdrop-blur-md">
-           <div className="bg-zinc-900 p-8 rounded-2xl border border-zinc-700 max-w-sm w-full shadow-2xl relative text-center">
+           <div className="bg-zinc-900 p-8 rounded-2xl border border-zinc-700 max-w-md w-full shadow-2xl relative text-center m-4">
              <button onClick={() => setShowCredits(false)} className="absolute top-4 right-4 text-gray-500 hover:text-white"><X size={20} /></button>
              <h2 className="text-xl font-bold text-cyan-400 mb-2 uppercase tracking-wider">Developer</h2>
              <div className="w-16 h-1 bg-cyan-500 mx-auto mb-8 rounded"></div>
              
-             <div className="mb-8">
-               <div className="w-20 h-20 bg-zinc-800 rounded-full mx-auto mb-4 flex items-center justify-center border-2 border-cyan-500/50">
-                 <User size={40} className="text-cyan-500" />
+             <div className="mb-6 flex flex-col items-center">
+               {/* AVATAR DISPLAY */}
+               <div className="mb-4 group relative">
+                 <LuminaAvatar size={120} className="border-4 border-zinc-800 group-hover:border-cyan-500 transition duration-500" />
                </div>
                <h3 className="text-xl font-bold text-white mb-1">Koushan De</h3>
                <p className="text-gray-500 text-sm">Creator & Developer</p>
@@ -894,7 +1129,7 @@ const App: React.FC = () => {
                   className="block w-full py-3 bg-[#0077b5] hover:bg-[#006396] text-white rounded transition flex items-center justify-center gap-2 text-sm font-bold tracking-wide">
                   <ExternalLink size={16} /> Connect on LinkedIn
                </a>
-               <a href="https://www.linkedin.com/in/koushan-de-04a966192/" target="_blank" rel="noopener noreferrer"
+               <a href="https://buymeacoffee.com/koushan" target="_blank" rel="noopener noreferrer"
                   className="block w-full py-3 bg-zinc-800 border border-zinc-600 hover:bg-zinc-700 text-white rounded transition flex items-center justify-center gap-2 text-sm font-bold tracking-wide">
                   <Coffee size={16} className="text-yellow-500" /> Support Developer
                </a>
@@ -905,7 +1140,7 @@ const App: React.FC = () => {
 
       {status === GameStatus.PAUSED && (
          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center z-50 animate-in fade-in duration-200">
-            <h2 className="text-4xl font-bold text-cyan-400 mb-8 tracking-[0.2em] font-serif" style={{ textShadow: '0 0 20px cyan' }}>PAUSED</h2>
+            <h2 className="text-4xl md:text-5xl font-bold text-cyan-400 mb-8 tracking-[0.2em] font-serif" style={{ textShadow: '0 0 20px cyan' }}>PAUSED</h2>
             <div className="flex flex-col gap-4 w-64">
                <button onClick={handleResume} className="px-6 py-3 bg-zinc-900 border border-zinc-700 hover:border-cyan-500 hover:text-cyan-400 text-gray-300 transition uppercase tracking-widest text-xs flex items-center justify-center gap-2">
                  <Play size={14} /> Resume
@@ -920,13 +1155,20 @@ const App: React.FC = () => {
          </div>
       )}
 
-      <div className="relative w-full max-w-[800px] aspect-[4/3] shadow-2xl rounded-lg overflow-hidden ring-1 ring-zinc-800 bg-black">
+      {/* GAME CANVAS CONTAINER */}
+      <div 
+        className="relative shadow-2xl rounded-lg overflow-hidden ring-1 ring-zinc-800 bg-black aspect-[4/3]"
+        style={{
+          width: 'min(100%, 800px, calc((100dvh - 2rem) * 1.333))', // Fits height in landscape
+        }}
+      >
         <GameCanvas 
           key={`${levelId}-${resetKey}`} 
           status={status} 
           currentLevelId={levelId}
           settings={settings}
           initialHealth={health}
+          initialCheckpoint={currentCheckpoint}
           onGameOver={handleGameOver}
           onLevelComplete={handleLevelComplete}
           onGameWon={handleVictory}
@@ -934,52 +1176,56 @@ const App: React.FC = () => {
           onUpdateMood={handleMoodUpdate}
           onHealthChange={setHealth}
           onShowWisdom={(msg) => setWisdomToast(msg)}
-          onCheckpointSave={() => setCheckpointToast(true)}
+          onCheckpointSave={handleCheckpointSave}
           onChaosStart={(active) => setIsChaosMode(active)}
           onTutorialUpdate={(state, msg) => setActiveTutorialMessage(msg)}
+          onPlayerDied={handlePlayerDied}
+          onLevelNameChange={(newName) => setDisplayLevelName(newName)}
         />
 
         {status === GameStatus.MENU && (
-          <div className="absolute inset-0 bg-black flex flex-col items-center justify-center z-10">
-            <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-cyan-900/20 via-black to-black"></div>
-            <div className="relative z-10 flex flex-col items-center animate-in fade-in zoom-in duration-700">
-              <div className="mb-8 relative">
-                 <div className="absolute -inset-4 bg-cyan-500/20 rounded-full blur-xl animate-pulse"></div>
-                 <div className="w-20 h-20 rounded-full bg-cyan-400 shadow-[0_0_50px_#00ffff] animate-bounce"></div>
-              </div>
-              <h1 className="text-6xl font-bold mb-2 text-transparent bg-clip-text bg-gradient-to-b from-white to-cyan-400 tracking-tighter" style={{ fontFamily: 'Cinzel, serif' }}>LUMINA</h1>
-              <div className="h-px w-32 bg-cyan-800 mb-8"></div>
-              
-              {playerId && <p className="text-xs text-gray-500 font-mono tracking-widest uppercase mb-6">SOUL ID: <span className="text-cyan-400">{playerId}</span></p>}
+          <div className="absolute inset-0 z-10 overflow-hidden">
+             <canvas ref={menuCanvasRef} className="absolute inset-0 w-full h-full" />
+             <div className="absolute inset-0 flex flex-col items-center justify-center z-20">
+                <div className="relative z-10 flex flex-col items-center animate-in fade-in zoom-in duration-700">
+                  <div className="mb-2 md:mb-8 relative">
+                    <div className="absolute -inset-4 bg-cyan-500/20 rounded-full blur-xl animate-pulse"></div>
+                    <div className="w-16 h-16 md:w-20 md:h-20 rounded-full bg-cyan-400 shadow-[0_0_50px_#00ffff] animate-bounce"></div>
+                  </div>
+                  <h1 className="text-3xl md:text-6xl font-bold mb-2 text-transparent bg-clip-text bg-gradient-to-b from-white to-cyan-400 tracking-tighter text-center" style={{ fontFamily: 'Cinzel, serif' }}>LUMINA</h1>
+                  <div className="h-px w-32 bg-cyan-800 mb-2 md:mb-8"></div>
+                  
+                  {playerId && <p className="text-xs text-gray-500 font-mono tracking-widest uppercase mb-4 md:mb-6">SOUL ID: <span className="text-cyan-400">{playerId}</span></p>}
 
-              <div className="flex flex-col gap-4 w-64">
-                {maxReachedLevel > 1 && <button onClick={handleResume} className="group relative px-4 py-3 bg-zinc-900 border border-zinc-700 hover:border-cyan-500 hover:text-cyan-400 text-gray-300 transition uppercase tracking-widest text-xs">Resume Journey</button>}
-                
-                <button onClick={handleStartNew} className="group relative px-4 py-3 bg-zinc-900 border border-zinc-700 hover:border-cyan-500 hover:text-cyan-400 text-gray-300 transition uppercase tracking-widest text-xs">New Game</button>
-                
-                <button onClick={() => setShowJourney(true)} className="group relative px-4 py-3 bg-zinc-900 border border-zinc-700 hover:border-purple-500 hover:text-purple-400 text-gray-300 transition uppercase tracking-widest text-xs flex items-center justify-center gap-2"><Map size={14} /> Journey</button>
-                
-                {!playerId ? (
-                    <button onClick={() => setShowAuth(true)} className="group relative px-4 py-3 bg-indigo-950 border border-indigo-800 hover:border-indigo-400 hover:text-indigo-300 text-indigo-400 transition uppercase tracking-widest text-xs flex items-center justify-center gap-2 shadow-[0_0_10px_rgba(79,70,229,0.1)]">
-                        <Key size={14} /> Connect Soul
-                    </button>
-                ) : (
-                    <button onClick={handleLogout} className="group relative px-4 py-3 bg-zinc-900 border border-zinc-800 hover:border-red-900 hover:text-red-400 text-gray-500 transition uppercase tracking-widest text-xs flex items-center justify-center gap-2">
-                        <LogOut size={14} /> Disconnect
-                    </button>
-                )}
-              </div>
-              <button onClick={() => setShowCredits(true)} className="mt-8 text-xs text-gray-600 hover:text-cyan-500 transition uppercase tracking-widest">Credits</button>
-            </div>
+                  <div className="flex flex-col gap-2 md:gap-4 w-48 md:w-64">
+                    {(maxReachedLevel > 1 || !!currentCheckpoint) && <button onClick={handleResume} className="group relative px-4 py-2 md:py-3 bg-zinc-900 border border-zinc-700 hover:border-cyan-500 hover:text-cyan-400 text-gray-300 transition uppercase tracking-widest text-xs">Resume Journey</button>}
+                    
+                    <button onClick={handleStartNew} className="group relative px-4 py-2 md:py-3 bg-zinc-900 border border-zinc-700 hover:border-cyan-500 hover:text-cyan-400 text-gray-300 transition uppercase tracking-widest text-xs">New Game</button>
+                    
+                    <button onClick={() => setShowJourney(true)} className="group relative px-4 py-2 md:py-3 bg-zinc-900 border border-zinc-700 hover:border-purple-500 hover:text-purple-400 text-gray-300 transition uppercase tracking-widest text-xs flex items-center justify-center gap-2"><Map size={14} /> Journey</button>
+                    
+                    {!playerId ? (
+                        <button onClick={() => setShowAuth(true)} className="group relative px-4 py-2 md:py-3 bg-indigo-950 border border-indigo-800 hover:border-indigo-400 hover:text-indigo-300 text-indigo-400 transition uppercase tracking-widest text-xs flex items-center justify-center gap-2 shadow-[0_0_10px_rgba(79,70,229,0.1)]">
+                            <Key size={14} /> Connect Soul
+                        </button>
+                    ) : (
+                        <button onClick={handleLogout} className="group relative px-4 py-2 md:py-3 bg-zinc-900 border border-zinc-800 hover:border-red-900 hover:text-red-400 text-gray-500 transition uppercase tracking-widest text-xs flex items-center justify-center gap-2">
+                            <LogOut size={14} /> Disconnect
+                        </button>
+                    )}
+                  </div>
+                  <button onClick={() => setShowCredits(true)} className="mt-2 md:mt-8 text-xs text-gray-600 hover:text-cyan-500 transition uppercase tracking-widest">Credits</button>
+                </div>
+             </div>
           </div>
         )}
 
         {status === GameStatus.GAME_OVER && (
           <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center backdrop-blur-sm z-10">
-            <h2 className="text-5xl font-bold text-red-600 mb-2 font-serif tracking-widest opacity-80">FADED</h2>
-            <p className="text-red-900/50 text-sm tracking-[0.5em] uppercase mb-8">The light dims...</p>
+            <h2 className="text-3xl md:text-5xl font-bold text-red-600 mb-2 font-serif tracking-widest opacity-80">FADED</h2>
+            <p className="text-red-900/50 text-xs md:text-sm tracking-[0.5em] uppercase mb-8">The light dims...</p>
             <div className="flex gap-4">
-              <button onClick={handleRetry} className="px-8 py-3 bg-red-950 text-red-200 border border-red-900 hover:bg-red-900 hover:border-red-500 transition-all rounded flex items-center gap-2"><RotateCcw size={16} /> REIGNITE</button>
+              <button onClick={handleRetry} className="px-6 md:px-8 py-3 bg-red-950 text-red-200 border border-red-900 hover:bg-red-900 hover:border-red-500 transition-all rounded flex items-center gap-2 text-xs md:text-sm"><RotateCcw size={16} /> REIGNITE</button>
               <button onClick={handleGoHome} className="px-4 py-3 bg-zinc-900 text-gray-400 border border-zinc-800 hover:bg-zinc-800 hover:text-white transition-all rounded flex items-center gap-2"><Home size={16} /></button>
             </div>
           </div>
@@ -990,9 +1236,9 @@ const App: React.FC = () => {
              <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-indigo-900/20 to-black"></div>
              <div className="relative z-10 text-center max-w-md px-6">
                <div className="w-12 h-12 mx-auto mb-6 border-2 border-indigo-500 rotate-45 flex items-center justify-center"><div className="w-8 h-8 bg-indigo-500/50"></div></div>
-               <h2 className="text-2xl text-indigo-300 mb-8 tracking-[0.2em] font-light">TRANSITION COMPLETE</h2>
+               <h2 className="text-xl md:text-2xl text-indigo-300 mb-8 tracking-[0.2em] font-light">TRANSITION COMPLETE</h2>
                <div className="min-h-[100px] flex items-center justify-center mb-8 relative">
-                 {loadingStory ? <span className="animate-pulse text-gray-500">Consulting the stars...</span> : <p className="text-lg font-serif italic text-gray-400 leading-relaxed">"{narrative}"</p>}
+                 {loadingStory ? <span className="animate-pulse text-gray-500">Consulting the stars...</span> : <p className="text-sm md:text-lg font-serif italic text-gray-400 leading-relaxed">"{narrative}"</p>}
                </div>
                <div className="flex flex-col gap-3">
                  <button onClick={handleNextLevel} disabled={loadingStory} className="px-10 py-3 bg-indigo-900/50 text-indigo-200 border border-indigo-800 hover:bg-indigo-800 transition-all uppercase tracking-wider text-sm disabled:opacity-50">Enter Level {levelId + 1}</button>
@@ -1006,9 +1252,9 @@ const App: React.FC = () => {
           <div className="absolute inset-0 flex flex-col items-center justify-center z-10">
              <div className="relative z-20 text-center p-8 animate-in fade-in duration-2000 delay-1000">
                 <Heart className="w-12 h-12 text-pink-600 mx-auto mb-6 animate-pulse" fill="currentColor" />
-                <h1 className="text-4xl font-bold text-zinc-800 mb-6 tracking-[0.2em]" style={{ fontFamily: 'Cinzel, serif' }}>UNION</h1>
+                <h1 className="text-3xl md:text-4xl font-bold text-zinc-800 mb-6 tracking-[0.2em]" style={{ fontFamily: 'Cinzel, serif' }}>UNION</h1>
                 <div className="min-h-[60px] mb-10">
-                  {!loadingStory && <p className="text-xl text-zinc-700 font-serif italic max-w-md mx-auto leading-relaxed">"{narrative}"</p>}
+                  {!loadingStory && <p className="text-lg md:text-xl text-zinc-700 font-serif italic max-w-md mx-auto leading-relaxed">"{narrative}"</p>}
                 </div>
                 <button onClick={() => { setLevelId(1); setStatus(GameStatus.MENU); setHealth(1.0); }} className="px-8 py-3 bg-white/80 hover:bg-white text-zinc-900 border border-zinc-300 rounded-sm shadow-lg transition backdrop-blur-md uppercase tracking-widest text-xs">Return to Void</button>
              </div>

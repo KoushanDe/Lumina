@@ -90,12 +90,23 @@ export interface TutorialState {
   jump: boolean;
   hazardShown: boolean;
   monsterShown: boolean;
+  evilPillShown: boolean; // New tutorial state
+}
+
+export interface CheckpointData {
+  levelId: number;
+  pos: Vector2;
+  health: number;
+  collectedPillIds: string[];
+  triggeredEvilPillIds: string[];
+  triggeredMirageId: string | null;
 }
 
 // Persistence System
 export interface PlayerProfile {
   id: string;
   maxReachedLevel: number;
+  currentCheckpoint?: CheckpointData | null; // Save in-level progress
   settings: GameSettings;
   created: number;
   lastPlayed: number;

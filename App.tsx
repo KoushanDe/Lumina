@@ -1,12 +1,19 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GameCanvas } from './components/GameCanvas';
-import { GameStatus, GameSettings, ControlScheme } from './types';
+import { GameStatus, GameSettings, ControlScheme, TutorialState, PlayerDatabase, PlayerProfile } from './types';
 import { LEVELS, WISDOM_QUOTES } from './constants';
 import { generateLevelNarrative } from './services/geminiService';
-import { Play, RotateCcw, Heart, Settings, X, Volume2, VolumeX, Music, HelpCircle, Map, Gamepad2, Smartphone, Home, ChevronLeft, ChevronRight, Anchor, Pause, BookOpen, User, ExternalLink, Coffee } from 'lucide-react';
+import { Play, RotateCcw, Heart, Settings, X, Volume2, VolumeX, Music, HelpCircle, Map, Gamepad2, Smartphone, Home, ChevronLeft, ChevronRight, Anchor, Pause, BookOpen, User, ExternalLink, Coffee, Info, LogIn, Key, Sparkles, Copy } from 'lucide-react';
 
 const App: React.FC = () => {
-  const [status, setStatus] = useState<GameStatus>(GameStatus.MENU);
+  // Auth State
+  const [status, setStatus] = useState<GameStatus>(GameStatus.AUTH);
+  const [playerId, setPlayerId] = useState<string | null>(null);
+  const [authInput, setAuthInput] = useState("");
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [newPlayerId, setNewPlayerId] = useState<string | null>(null); // For showing the modal after creation
+
+  // Game State
   const [levelId, setLevelId] = useState(1);
   const [narrative, setNarrative] = useState<string>("");
   const [loadingStory, setLoadingStory] = useState(false);
@@ -32,6 +39,8 @@ const App: React.FC = () => {
   
   const [resetKey, setResetKey] = useState(0);
   const [isChaosMode, setIsChaosMode] = useState(false);
+  
+  const [activeTutorialMessage, setActiveTutorialMessage] = useState<string | null>(null);
 
   const journeyScrollRef = useRef<HTMLDivElement>(null);
 
@@ -39,22 +48,110 @@ const App: React.FC = () => {
   const deathCountRef = useRef(0);
   const wisdomThreshold = useRef(Math.floor(Math.random() * 5) + 6); 
 
-  useEffect(() => {
-    // Restore Persistence
-    const savedMax = localStorage.getItem('lumina_max_level');
-    if (savedMax) setMaxReachedLevel(parseInt(savedMax, 10));
+  // --- DATABASE HELPERS ---
+  const getDatabase = (): PlayerDatabase => {
+    const dbStr = localStorage.getItem('lumina_player_db');
+    return dbStr ? JSON.parse(dbStr) : {};
+  };
+
+  const saveDatabase = (db: PlayerDatabase) => {
+    localStorage.setItem('lumina_player_db', JSON.stringify(db));
+  };
+
+  const generateId = () => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // No O, I, 0, 1 for clarity
+    let result = '';
+    for (let i = 0; i < 6; i++) {
+      result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
+  };
+
+  // --- AUTH LOGIC ---
+  const handleLogin = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const id = authInput.trim().toUpperCase();
+    if (!id) return;
+
+    const db = getDatabase();
+    if (db[id]) {
+      // Found
+      setPlayerId(id);
+      setMaxReachedLevel(db[id].maxReachedLevel);
+      setSettings(db[id].settings);
+      setStatus(GameStatus.MENU);
+      setAuthError(null);
+      // Update last played
+      db[id].lastPlayed = Date.now();
+      saveDatabase(db);
+      // Cache current session
+      localStorage.setItem('lumina_current_player', id);
+    } else {
+      setAuthError("Soul ID not found in the void.");
+    }
+  };
+
+  const handleCreateAccount = () => {
+    const db = getDatabase();
+    let newId = generateId();
+    while (db[newId]) newId = generateId(); // Ensure unique
+
+    const newProfile: PlayerProfile = {
+      id: newId,
+      maxReachedLevel: 1,
+      settings: settings,
+      created: Date.now(),
+      lastPlayed: Date.now()
+    };
+
+    db[newId] = newProfile;
+    saveDatabase(db);
     
-    const savedSettings = localStorage.getItem('lumina_settings');
-    if (savedSettings) setSettings(JSON.parse(savedSettings));
+    setPlayerId(newId);
+    setNewPlayerId(newId); // Trigger modal
+    setMaxReachedLevel(1);
+    setStatus(GameStatus.MENU);
+    localStorage.setItem('lumina_current_player', newId);
+  };
+
+  const handleLogout = () => {
+    setPlayerId(null);
+    setStatus(GameStatus.AUTH);
+    setNewPlayerId(null);
+    setAuthInput("");
+    localStorage.removeItem('lumina_current_player');
+    stopBgm(); // Ensure music stops on logout
+  };
+
+  // --- PERSISTENCE ---
+  const saveProgress = () => {
+    if (!playerId) return;
+    const db = getDatabase();
+    if (db[playerId]) {
+      db[playerId].maxReachedLevel = maxReachedLevel;
+      db[playerId].settings = settings;
+      db[playerId].lastPlayed = Date.now();
+      saveDatabase(db);
+    }
+  };
+
+  useEffect(() => {
+    // Check for auto-login
+    const cachedId = localStorage.getItem('lumina_current_player');
+    if (cachedId) {
+      const db = getDatabase();
+      if (db[cachedId]) {
+         setPlayerId(cachedId);
+         setMaxReachedLevel(db[cachedId].maxReachedLevel);
+         setSettings(db[cachedId].settings);
+         setStatus(GameStatus.MENU);
+      }
+    }
   }, []);
 
   useEffect(() => {
-    localStorage.setItem('lumina_max_level', maxReachedLevel.toString());
-  }, [maxReachedLevel]);
-
-  useEffect(() => {
-    localStorage.setItem('lumina_settings', JSON.stringify(settings));
-  }, [settings]);
+    saveProgress();
+  }, [maxReachedLevel, settings]);
 
   useEffect(() => {
     if (wisdomToast) {
@@ -323,8 +420,7 @@ const App: React.FC = () => {
           rOsc.start(now); rOsc.stop(now + 1.5);
        });
     } else if (type === 'sad') {
-        // Extended Sad Sound
-        const notes = [196.00, 233.08, 293.66, 174.61]; // G Minor with F
+        const notes = [196.00, 233.08, 293.66, 174.61]; 
         notes.forEach((freq, i) => {
            const sOsc = ctx.createOscillator();
            const sGain = ctx.createGain();
@@ -507,13 +603,79 @@ const App: React.FC = () => {
     return hearts;
   };
 
+  // --- RENDER ---
+
+  const currentLevel = LEVELS.find(l => l.id === levelId);
+
+  if (status === GameStatus.AUTH) {
+    return (
+      <div className="min-h-screen bg-black flex flex-col items-center justify-center p-4 font-sans text-white overflow-hidden relative">
+         <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-indigo-950/40 via-black to-black"></div>
+         
+         <div className="relative z-10 w-full max-w-md animate-in fade-in zoom-in duration-1000">
+            <div className="text-center mb-12">
+               <h1 className="text-5xl font-bold mb-4 text-transparent bg-clip-text bg-gradient-to-b from-cyan-100 to-cyan-600 tracking-tighter" style={{ fontFamily: 'Cinzel, serif' }}>LUMINA</h1>
+               <div className="h-px w-24 bg-cyan-900 mx-auto"></div>
+            </div>
+
+            <div className="bg-zinc-900/50 border border-zinc-800 rounded-2xl p-8 backdrop-blur-md shadow-2xl">
+               <h2 className="text-center text-cyan-400 font-bold tracking-widest uppercase text-sm mb-6">Establish Connection</h2>
+               
+               <div className="space-y-6">
+                  {/* Returning Player */}
+                  <div>
+                    <form onSubmit={handleLogin} className="flex gap-2">
+                       <div className="relative flex-1">
+                          <input 
+                            type="text" 
+                            value={authInput}
+                            onChange={(e) => setAuthInput(e.target.value)}
+                            placeholder="Enter Soul ID"
+                            maxLength={6}
+                            className="w-full bg-black/50 border border-zinc-700 rounded px-4 py-3 text-center text-white tracking-[0.2em] font-mono focus:outline-none focus:border-cyan-500 transition placeholder:text-zinc-700 uppercase"
+                          />
+                          <Key size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600" />
+                       </div>
+                       <button type="submit" className="bg-cyan-900/80 hover:bg-cyan-800 text-cyan-200 px-4 rounded border border-cyan-800 transition"><LogIn size={20} /></button>
+                    </form>
+                    {authError && <p className="text-red-400 text-xs text-center mt-2 animate-pulse">{authError}</p>}
+                  </div>
+
+                  <div className="flex items-center gap-4">
+                     <div className="h-px flex-1 bg-zinc-800"></div>
+                     <span className="text-zinc-600 text-xs uppercase">Or</span>
+                     <div className="h-px flex-1 bg-zinc-800"></div>
+                  </div>
+
+                  {/* New Player */}
+                  <button onClick={handleCreateAccount} className="w-full py-4 bg-gradient-to-r from-indigo-900 to-purple-900 hover:from-indigo-800 hover:to-purple-800 border border-indigo-700 rounded-lg text-white font-bold tracking-wider uppercase text-xs flex items-center justify-center gap-2 transition-all shadow-[0_0_15px_rgba(79,70,229,0.2)] hover:shadow-[0_0_25px_rgba(79,70,229,0.4)]">
+                     <Sparkles size={16} /> Begin New Journey
+                  </button>
+               </div>
+            </div>
+         </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-zinc-950 flex flex-col items-center justify-center p-4 font-sans text-white overflow-hidden relative selection:bg-cyan-500/30">
       <div className={`absolute top-4 left-0 right-0 flex justify-between px-8 pointer-events-none transition-opacity duration-1000 ${status === GameStatus.VICTORY ? 'opacity-0' : 'opacity-100'} z-40`}>
-        <div className="text-left flex flex-col gap-2">
+        <div className="text-left flex flex-col gap-2 pointer-events-auto">
            <div>
-             <h1 className="text-xl font-bold tracking-widest text-cyan-400" style={{ fontFamily: 'Orbitron, sans-serif', textShadow: '0 0 10px cyan' }}>LUMINA</h1>
-             <p className="text-[10px] text-gray-500 tracking-widest uppercase">Level {levelId}</p>
+             {status === GameStatus.PLAYING ? (
+               <>
+                 <h1 className="text-xl font-bold tracking-widest text-cyan-400" style={{ fontFamily: 'Orbitron, sans-serif', textShadow: '0 0 10px cyan' }}>
+                   {currentLevel?.name.toUpperCase()}
+                 </h1>
+                 <p className="text-[10px] text-gray-500 tracking-widest uppercase">LEVEL {levelId}</p>
+               </>
+             ) : (
+               <>
+                 <h1 className="text-xl font-bold tracking-widest text-cyan-400" style={{ fontFamily: 'Orbitron, sans-serif', textShadow: '0 0 10px cyan' }}>LUMINA</h1>
+                 <p className="text-[10px] text-gray-500 tracking-widest uppercase">ID: <span className="text-gray-300 font-mono">{playerId}</span></p>
+               </>
+             )}
            </div>
            {status === GameStatus.PLAYING && (
              <div className="flex gap-1 animate-in slide-in-from-left-4 duration-500">{renderHearts()}</div>
@@ -546,6 +708,30 @@ const App: React.FC = () => {
               <Anchor size={16} className="text-emerald-400" />
               <span className="text-emerald-200 text-xs font-bold tracking-wider uppercase">Light Anchored</span>
            </div>
+        </div>
+      )}
+      {status === GameStatus.PLAYING && activeTutorialMessage && (
+        <div className="absolute bottom-32 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-4 fade-in duration-500 pointer-events-none">
+           <div className="bg-black/80 border border-cyan-500/50 px-6 py-3 rounded-full shadow-[0_0_20px_rgba(0,255,255,0.1)] flex items-center gap-3 backdrop-blur-md">
+              <Info size={16} className="text-cyan-400" />
+              <span className="text-cyan-100 text-sm font-bold tracking-wide">{activeTutorialMessage}</span>
+           </div>
+        </div>
+      )}
+
+      {/* NEW PLAYER ID MODAL */}
+      {newPlayerId && (
+        <div className="absolute inset-0 bg-black/95 flex items-center justify-center z-[100] backdrop-blur-md">
+            <div className="bg-zinc-900 p-8 rounded-2xl border border-cyan-500 max-w-sm w-full text-center">
+               <h2 className="text-2xl font-bold text-cyan-400 mb-2">SOUL BORN</h2>
+               <p className="text-gray-400 text-sm mb-6">Keep this ID safe. It is the only way to return to this journey.</p>
+               
+               <div className="bg-black p-4 rounded-lg border border-zinc-800 mb-6 flex items-center justify-center gap-3">
+                  <span className="text-3xl font-mono tracking-[0.2em] text-white">{newPlayerId}</span>
+               </div>
+
+               <button onClick={() => setNewPlayerId(null)} className="w-full py-3 bg-cyan-900 hover:bg-cyan-800 text-white rounded font-bold uppercase tracking-wider transition">I Have Saved It</button>
+            </div>
         </div>
       )}
       
@@ -654,6 +840,10 @@ const App: React.FC = () => {
                  <span className="text-gray-400 group-hover:text-white transition">Haptics</span>
                  <div onClick={() => setSettings(s => ({ ...s, haptics: !s.haptics }))} className={`w-12 h-6 rounded-full relative transition duration-300 ${settings.haptics ? 'bg-pink-600' : 'bg-zinc-700'}`}><div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all duration-300 ${settings.haptics ? 'left-7' : 'left-1'}`}></div></div>
                </label>
+               
+               <div className="pt-4 border-t border-zinc-800">
+                  <button onClick={handleLogout} className="w-full py-2 bg-red-900/50 hover:bg-red-900 text-red-300 border border-red-900/50 rounded uppercase text-xs tracking-wider transition">Disconnect Soul</button>
+               </div>
              </div>
            </div>
         </div>
@@ -721,6 +911,7 @@ const App: React.FC = () => {
           onShowWisdom={(msg) => setWisdomToast(msg)}
           onCheckpointSave={() => setCheckpointToast(true)}
           onChaosStart={(active) => setIsChaosMode(active)}
+          onTutorialUpdate={(state, msg) => setActiveTutorialMessage(msg)}
         />
 
         {status === GameStatus.MENU && (

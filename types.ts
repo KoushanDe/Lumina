@@ -52,6 +52,7 @@ export interface Level {
 }
 
 export enum GameStatus {
+  AUTH = 'AUTH', // New status for Login Screen
   MENU = 'MENU',
   PLAYING = 'PLAYING',
   PAUSED = 'PAUSED',
@@ -81,4 +82,25 @@ export interface GameSettings {
   haptics: boolean;
   controlScheme: ControlScheme;
   health?: number;
+}
+
+export interface TutorialState {
+  moveLeft: boolean;
+  moveRight: boolean;
+  jump: boolean;
+  hazardShown: boolean;
+  monsterShown: boolean;
+}
+
+// Persistence System
+export interface PlayerProfile {
+  id: string;
+  maxReachedLevel: number;
+  settings: GameSettings;
+  created: number;
+  lastPlayed: number;
+}
+
+export interface PlayerDatabase {
+  [playerId: string]: PlayerProfile;
 }

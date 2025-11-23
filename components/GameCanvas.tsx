@@ -1,6 +1,6 @@
 
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { EntityType, GameStatus, Level, Particle, Vector2, GameSettings, Entity } from '../types';
+import { EntityType, GameStatus, Level, Particle, Vector2, GameSettings, Entity, TutorialState } from '../types';
 import { 
   GRAVITY, FRICTION, MOVE_SPEED, MAX_SPEED, JUMP_FORCE, LEVELS, 
   COLOR_PLAYER, COLOR_PLAYER_GLOW, COLOR_PLAYER_EVIL, COLOR_PLAYER_EVIL_GLOW,
@@ -23,6 +23,7 @@ interface GameCanvasProps {
   onShowWisdom: (wisdom: string) => void;
   onCheckpointSave: () => void;
   onChaosStart: (active: boolean) => void;
+  onTutorialUpdate?: (state: Partial<TutorialState>, activeMessage: string | null) => void;
 }
 
 export const GameCanvas: React.FC<GameCanvasProps> = ({ 
@@ -38,7 +39,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   onHealthChange,
   onShowWisdom,
   onCheckpointSave,
-  onChaosStart
+  onChaosStart,
+  onTutorialUpdate
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const requestRef = useRef<number>();
@@ -82,6 +84,16 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   // Level 4 Decoy Physics
   const decoyVelocity = useRef<number>(0);
   const decoyWisdomTriggered = useRef<boolean>(false);
+
+  // Tutorial State
+  const tutorialState = useRef<TutorialState>({
+     moveLeft: false,
+     moveRight: false,
+     jump: false,
+     hazardShown: false,
+     monsterShown: false
+  });
+  const activeTutorialMessage = useRef<string | null>(null);
 
   // Projectiles
   const projectiles = useRef<Entity[]>([]);
@@ -127,6 +139,21 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     
     decoyVelocity.current = 0;
     decoyWisdomTriggered.current = false;
+
+    // Reset Tutorial State on New Game Level 1
+    if (currentLevelId === 1) {
+       tutorialState.current = {
+          moveLeft: false,
+          moveRight: false,
+          jump: false,
+          hazardShown: false,
+          monsterShown: false
+       };
+       activeTutorialMessage.current = "Use Arrow Keys or WASD to move.";
+       if (onTutorialUpdate) onTutorialUpdate(tutorialState.current, activeTutorialMessage.current);
+    } else {
+       if (onTutorialUpdate) onTutorialUpdate({}, null); // Clear tutorials
+    }
 
     onHealthChange(startHealth);
 
@@ -215,6 +242,46 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     
     globalTime.current += 0.02;
     if (invulnerableFrames.current > 0) invulnerableFrames.current--;
+
+    // --- TUTORIAL LOGIC LEVEL 1 ---
+    if (currentLevelId === 1 && onTutorialUpdate) {
+        let needsUpdate = false;
+        const pos = playerPos.current;
+
+        // 1. Movement Check (Action Based)
+        // Handled in input section below
+
+        // 2. Hazard Check (Position Based) - Approx first hazard location
+        if (!tutorialState.current.hazardShown && pos.x > 800) {
+            activeTutorialMessage.current = "Red Obstacles and Void are fatal. Avoid them.";
+            tutorialState.current.hazardShown = true;
+            needsUpdate = true;
+            // Auto dismiss hazard message after 4 seconds
+            setTimeout(() => {
+                 if (activeTutorialMessage.current && activeTutorialMessage.current.includes("Red")) {
+                     activeTutorialMessage.current = null;
+                     if (onTutorialUpdate) onTutorialUpdate({}, null);
+                 }
+            }, 4000);
+        }
+
+        // 3. Monster Check (Position Based) - Approx first monster location
+        if (!tutorialState.current.monsterShown && pos.x > 2200) {
+            activeTutorialMessage.current = "Monsters hurt you. Jump over them.";
+            tutorialState.current.monsterShown = true;
+            needsUpdate = true;
+             // Auto dismiss after 4 seconds
+             setTimeout(() => {
+                 if (activeTutorialMessage.current && activeTutorialMessage.current.includes("Monsters")) {
+                     activeTutorialMessage.current = null;
+                     if (onTutorialUpdate) onTutorialUpdate({}, null);
+                 }
+            }, 4000);
+        }
+        
+        if (needsUpdate) onTutorialUpdate(tutorialState.current, activeTutorialMessage.current);
+    }
+
 
     // --- HEALTH DRAIN LOGIC ---
     if (healthDrainActive.current) {
@@ -558,6 +625,23 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       let rightInput = keys['ArrowRight'] || keys['KeyD'] || touchInput.right;
       let involuntaryMove = false;
       
+      // Tutorial Action Dismissal
+      if (currentLevelId === 1 && onTutorialUpdate) {
+         if ((leftInput || rightInput) && (!tutorialState.current.moveLeft || !tutorialState.current.moveRight)) {
+             tutorialState.current.moveLeft = true;
+             tutorialState.current.moveRight = true;
+             // Only clear if Jump is also done OR if current message is just about movement
+             if (activeTutorialMessage.current && activeTutorialMessage.current.includes("Move")) {
+                  if (tutorialState.current.jump) {
+                      activeTutorialMessage.current = null;
+                  } else {
+                      activeTutorialMessage.current = "Press Space or Up to Jump.";
+                  }
+                  onTutorialUpdate(tutorialState.current, activeTutorialMessage.current);
+             }
+         }
+      }
+
       if (reversedControlsTimer.current > 0) {
           // If player tries to control, inputs are swapped
           const temp = leftInput;
@@ -592,6 +676,15 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           onPlaySound('jump');
           triggerHaptic(10);
           spawnParticles(pos.x, pos.y + 10, '#fff', 3);
+          
+          // Tutorial Jump Dismissal
+          if (currentLevelId === 1 && onTutorialUpdate && !tutorialState.current.jump) {
+             tutorialState.current.jump = true;
+             if (activeTutorialMessage.current && activeTutorialMessage.current.includes("Jump")) {
+                 activeTutorialMessage.current = null;
+                 onTutorialUpdate(tutorialState.current, activeTutorialMessage.current);
+             }
+          }
         }
       }
       wasJumpPressed.current = !!jumpInput;
@@ -807,7 +900,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
        spawnParticles(cx + Math.random() * 800, cy + Math.random() * 600, '#fff', 1, 'bird');
     }
 
-  }, [status, keys, touchInput, onGameOver, onLevelComplete, onGameWon, settings.haptics, onUpdateMood, currentLevelId, onCheckpointSave, onPlaySound, takeDamage]);
+  }, [status, keys, touchInput, onGameOver, onLevelComplete, onGameWon, settings.haptics, onUpdateMood, currentLevelId, onCheckpointSave, onPlaySound, takeDamage, onTutorialUpdate]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;

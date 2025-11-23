@@ -3,11 +3,14 @@ export enum EntityType {
   PLAYER = 'PLAYER',
   GOAL = 'GOAL',
   PLATFORM = 'PLATFORM',
+  MOVING_PLATFORM = 'MOVING_PLATFORM',
   HAZARD = 'HAZARD',
   PARTICLE = 'PARTICLE',
   SIGN = 'SIGN',
   MONSTER = 'MONSTER',
-  NPC = 'NPC'
+  NPC = 'NPC',
+  CHECKPOINT = 'CHECKPOINT',
+  PILL = 'PILL'
 }
 
 export interface Vector2 {
@@ -19,12 +22,18 @@ export interface Entity {
   id: string;
   type: EntityType;
   pos: Vector2;
-  initialPos?: Vector2; // For patrolling monsters to know origin
+  initialPos?: Vector2; // For patrolling monsters or moving platforms
   size: Vector2; // Width/Height for rects, Radius/Radius for circles
   velocity?: Vector2;
   color: string;
   glowColor?: string;
   properties?: Record<string, any>; // e.g., direction for signs, range for monsters
+  wisdom?: string; // For pills
+  
+  // Moving Platform Props
+  moveAxis?: 'x' | 'y';
+  moveRange?: number;
+  moveSpeed?: number;
 }
 
 export interface Level {
@@ -41,6 +50,7 @@ export interface Level {
 export enum GameStatus {
   MENU = 'MENU',
   PLAYING = 'PLAYING',
+  RESPAWNING = 'RESPAWNING',
   LEVEL_COMPLETE = 'LEVEL_COMPLETE',
   GAME_OVER = 'GAME_OVER',
   VICTORY = 'VICTORY'
@@ -65,4 +75,5 @@ export interface GameSettings {
   sfxVolume: number;   // 0.0 to 1.0
   haptics: boolean;
   controlScheme: ControlScheme;
+  health?: number;
 }

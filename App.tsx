@@ -1,10 +1,9 @@
-
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GameCanvas } from './components/GameCanvas';
 import { GameStatus, GameSettings, ControlScheme } from './types';
-import { LEVELS } from './constants';
+import { LEVELS, WISDOM_QUOTES } from './constants';
 import { generateLevelNarrative } from './services/geminiService';
-import { Play, RotateCcw, Heart, Settings, X, Volume2, VolumeX, Music, HelpCircle, Map, Gamepad2, Smartphone, Home, ChevronLeft, ChevronRight, Anchor } from 'lucide-react';
+import { Play, RotateCcw, Heart, Settings, X, Volume2, VolumeX, Music, HelpCircle, Map, Gamepad2, Smartphone, Home, ChevronLeft, ChevronRight, Anchor, Pause, BookOpen, User, ExternalLink, Coffee } from 'lucide-react';
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<GameStatus>(GameStatus.MENU);
@@ -12,13 +11,14 @@ const App: React.FC = () => {
   const [narrative, setNarrative] = useState<string>("");
   const [loadingStory, setLoadingStory] = useState(false);
   
-  // Persistence
   const [maxReachedLevel, setMaxReachedLevel] = useState(1);
 
-  // UI State
   const [showSettings, setShowSettings] = useState(false);
   const [showObjective, setShowObjective] = useState(false);
+  const [showStory, setShowStory] = useState(false);
   const [showJourney, setShowJourney] = useState(false);
+  const [showCredits, setShowCredits] = useState(false);
+
   const [settings, setSettings] = useState<GameSettings>({
     musicVolume: 0.4,
     sfxVolume: 0.5,
@@ -29,11 +29,18 @@ const App: React.FC = () => {
   const [health, setHealth] = useState(1.0);
   const [wisdomToast, setWisdomToast] = useState<string | null>(null);
   const [checkpointToast, setCheckpointToast] = useState(false);
+  
+  const [resetKey, setResetKey] = useState(0);
+  const [isChaosMode, setIsChaosMode] = useState(false);
 
   const journeyScrollRef = useRef<HTMLDivElement>(null);
 
-  // Load Max Level
+  const [mood, setMood] = useState<'curious' | 'calm' | 'hopeful' | 'tense'>('curious');
+  const deathCountRef = useRef(0);
+  const wisdomThreshold = useRef(Math.floor(Math.random() * 5) + 6); 
+
   useEffect(() => {
+    // Restore Persistence
     const savedMax = localStorage.getItem('lumina_max_level');
     if (savedMax) setMaxReachedLevel(parseInt(savedMax, 10));
     
@@ -63,25 +70,15 @@ const App: React.FC = () => {
     }
   }, [checkpointToast]);
 
-  // Mood System
-  const [mood, setMood] = useState<'curious' | 'calm' | 'hopeful' | 'tense'>('curious');
-  const deathCountRef = useRef(0);
-
-  // --- Audio System (Dual-Sine Harp Synthesizer) ---
   const audioCtxRef = useRef<AudioContext | null>(null);
   const delayNodeRef = useRef<DelayNode | null>(null);
   const bgmIntervalRef = useRef<number | null>(null);
   const seqStepRef = useRef<number>(0);
   
-  // Harp Scales
   const HARP_SCALES = useRef({
-    // Dorian: Mysterious but pleasant
     curious: [196.00, 220.00, 261.63, 293.66, 349.23, 392.00], 
-    // Tense: Diminished/Whole tone feel for monsters
     tense: [164.81, 185.00, 233.08, 261.63], 
-    // Calm: Pentatonic Major, very slow
     calm: [130.81, 164.81, 196.00, 261.63], 
-    // Hopeful: Lydian Mode (Sharp 4th) for magic
     hopeful: [349.23, 392.00, 440.00, 493.88, 523.25, 587.33, 659.25, 698.46] 
   }).current;
 
@@ -91,16 +88,15 @@ const App: React.FC = () => {
       const ctx = new Ctx();
       audioCtxRef.current = ctx;
 
-      // Master Effects Chain: Delay -> Reverb-ish Feedback
       const delay = ctx.createDelay();
-      delay.delayTime.value = 0.4; // 400ms for spacious echo
+      delay.delayTime.value = 0.4; 
       
       const feedback = ctx.createGain();
-      feedback.gain.value = 0.5; // Long decay
+      feedback.gain.value = 0.5; 
 
       const filter = ctx.createBiquadFilter();
       filter.type = 'lowpass';
-      filter.frequency.value = 1200; // Darken the echoes
+      filter.frequency.value = 1200; 
 
       const masterGain = ctx.createGain();
       masterGain.gain.value = 0.8;
@@ -124,24 +120,21 @@ const App: React.FC = () => {
     const now = ctx.currentTime;
     const dest = delayNodeRef.current || ctx.destination;
 
-    // Master gain
     const masterGain = ctx.createGain();
     masterGain.gain.setValueAtTime(0, now);
-    // Reduced volume multiplier (0.5) for softer sound
     masterGain.gain.linearRampToValueAtTime(volume * settings.musicVolume * 0.5, now + 0.02); 
     masterGain.gain.exponentialRampToValueAtTime(0.001, now + duration);
     
     masterGain.connect(dest);
     masterGain.connect(ctx.destination);
 
-    // Dual Oscillator Detune Synthesis (Chorus effect)
     const osc1 = ctx.createOscillator();
     osc1.type = 'sine';
     osc1.frequency.value = freq;
 
     const osc2 = ctx.createOscillator();
     osc2.type = 'sine';
-    osc2.frequency.value = freq * 1.005; // Slight detune up
+    osc2.frequency.value = freq * 1.005; 
     
     osc1.connect(masterGain);
     osc2.connect(masterGain);
@@ -152,30 +145,61 @@ const App: React.FC = () => {
     osc2.stop(now + duration);
   }, [settings.musicVolume]);
 
+  const playChaosSound = useCallback(() => {
+    if (!audioCtxRef.current || settings.musicVolume <= 0) return;
+    const ctx = audioCtxRef.current;
+    const now = ctx.currentTime;
+    
+    // Create dissonant loop
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(100 + Math.random() * 500, now);
+    osc.frequency.linearRampToValueAtTime(100 + Math.random() * 500, now + 0.15);
+    
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.1 * settings.musicVolume, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+    
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.15);
+  }, [settings.musicVolume]);
+
   const playBgmStep = useCallback(() => {
-    if (status !== GameStatus.PLAYING && status !== GameStatus.VICTORY) return;
+    if (status !== GameStatus.PLAYING && status !== GameStatus.VICTORY && status !== GameStatus.GAME_OVER) return;
+    
+    if (isChaosMode) {
+        playChaosSound();
+        return;
+    }
+
     seqStepRef.current = (seqStepRef.current + 1) % 32;
     const step = seqStepRef.current;
 
     if (status === GameStatus.VICTORY) {
        const scale = HARP_SCALES.hopeful;
-       if (step % 2 === 0) playHarpNote(scale[step % scale.length], 0.3, 4);
-       if (step % 8 === 0) playHarpNote(scale[0]/2, 0.3, 6);
+       const noteIdx = [0, 2, 4, 7, 8, 7, 4, 2]; 
+       
+       if (step % 2 === 0) {
+          const idx = (step / 2) % noteIdx.length;
+          const note = scale[noteIdx[idx] % scale.length] * (noteIdx[idx] >= scale.length ? 2 : 1);
+          playHarpNote(note, 0.25, 3.0);
+       }
+       if (step % 16 === 0) playHarpNote(scale[0]/2, 0.3, 6.0);
+       if (step % 8 === 0) playHarpNote(scale[0]*2, 0.1, 4.0);
        return;
     }
 
-    // --- MOOD ENGINE ---
     if (mood === 'tense') {
-       // Rapid, low, unsettling
        const scale = HARP_SCALES.tense;
        if (step % 4 === 0) {
           const note = scale[Math.floor(Math.random() * scale.length)];
           playHarpNote(note, 0.25, 1.0);
        }
-       if (step % 16 === 0) playHarpNote(scale[0] / 2, 0.3, 2.0); // Low drone
+       if (step % 16 === 0) playHarpNote(scale[0] / 2, 0.3, 2.0); 
     }
     else if (mood === 'curious') {
-       // Sparse, melodic
        if (Math.random() < 0.15 && step % 2 === 0) {
           const scale = HARP_SCALES.curious;
           const note = scale[Math.floor(Math.random() * scale.length)];
@@ -184,30 +208,27 @@ const App: React.FC = () => {
        }
     } 
     else if (mood === 'calm') {
-       // Slow grounding chords
        if (step % 16 === 0) {
           const scale = HARP_SCALES.calm;
           playHarpNote(scale[0], 0.3, 5.0);
-          setTimeout(() => playHarpNote(scale[2], 0.2, 5.0), 200); // Strum
+          setTimeout(() => playHarpNote(scale[2], 0.2, 5.0), 200); 
        }
     }
     else if (mood === 'hopeful') {
-       // Flowing arpeggios
        const scale = HARP_SCALES.hopeful;
        if (step % 4 === 0) {
-          // Ascending pattern
           const idx = (step / 4) % scale.length;
           playHarpNote(scale[idx], 0.25, 2.5);
        }
        if (step % 16 === 0) playHarpNote(scale[0]/2, 0.25, 4.0);
     }
-  }, [mood, status, playHarpNote, HARP_SCALES]);
+  }, [mood, status, playHarpNote, HARP_SCALES, isChaosMode, playChaosSound]);
 
   const startBgm = () => {
     stopBgm();
     if (settings.musicVolume <= 0) return;
     initAudio();
-    bgmIntervalRef.current = window.setInterval(playBgmStep, 150); // Slightly faster clock
+    bgmIntervalRef.current = window.setInterval(playBgmStep, isChaosMode ? 100 : 150); // Faster during chaos
   };
 
   const stopBgm = () => {
@@ -218,15 +239,15 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    if (settings.musicVolume > 0 && (status === GameStatus.PLAYING || status === GameStatus.VICTORY)) {
+    if (settings.musicVolume > 0 && (status === GameStatus.PLAYING || status === GameStatus.VICTORY || status === GameStatus.GAME_OVER)) {
       startBgm();
     } else {
       stopBgm();
     }
     return () => stopBgm();
-  }, [settings.musicVolume, status, mood]);
+  }, [settings.musicVolume, status, mood, isChaosMode]);
 
-  const playSound = (type: 'jump' | 'die' | 'portal' | 'victory' | 'checkpoint' | 'pill' | 'respawn') => {
+  const playSound = (type: 'jump' | 'die' | 'portal' | 'victory' | 'checkpoint' | 'pill' | 'respawn' | 'sad' | 'hopeful_pill' | 'panic') => {
     if (settings.sfxVolume <= 0) return; 
     initAudio();
     const ctx = audioCtxRef.current;
@@ -264,19 +285,15 @@ const App: React.FC = () => {
       pGain.connect(ctx.destination);
       pOsc.start(now); pOsc.stop(now + 1.0);
     } else if (type === 'checkpoint') {
-       // Soft ethereal chime
        osc.type = 'sine';
        osc.frequency.setValueAtTime(800, now);
        osc.frequency.exponentialRampToValueAtTime(1200, now + 0.1);
-       osc.frequency.exponentialRampToValueAtTime(2000, now + 2.0); // Slow rise
-       
+       osc.frequency.exponentialRampToValueAtTime(2000, now + 2.0); 
        gain.gain.setValueAtTime(0, now);
-       gain.gain.linearRampToValueAtTime(0.2 * vol, now + 0.05); // Soft attack
-       gain.gain.exponentialRampToValueAtTime(0.001, now + 2.5); // Very long decay
-       
+       gain.gain.linearRampToValueAtTime(0.2 * vol, now + 0.05); 
+       gain.gain.exponentialRampToValueAtTime(0.001, now + 2.5); 
        osc.start(now); osc.stop(now + 2.5);
     } else if (type === 'pill') {
-       // Magical shimmer arpeggio
        const baseFreq = 600;
        [0, 1, 2, 3].forEach((i) => {
            const tOsc = ctx.createOscillator();
@@ -291,23 +308,58 @@ const App: React.FC = () => {
            tOsc.stop(now + (i * 0.05) + 0.3);
        });
     } else if (type === 'respawn') {
-       // Mystical Swell (Light reforming)
-       const notes = [220, 330, 440]; // A Major chord swell
+       const notes = [220, 330, 440]; 
        notes.forEach((freq, i) => {
           const rOsc = ctx.createOscillator();
           const rGain = ctx.createGain();
           rOsc.type = 'sine';
           rOsc.frequency.setValueAtTime(freq, now);
-          rOsc.frequency.linearRampToValueAtTime(freq * 1.5, now + 1.0); // Slight rise
-          
+          rOsc.frequency.linearRampToValueAtTime(freq * 1.5, now + 1.0); 
           rGain.gain.setValueAtTime(0, now);
           rGain.gain.linearRampToValueAtTime(0.1 * vol, now + 0.5);
           rGain.gain.linearRampToValueAtTime(0, now + 1.5);
-          
           rOsc.connect(rGain);
           rGain.connect(ctx.destination);
           rOsc.start(now); rOsc.stop(now + 1.5);
        });
+    } else if (type === 'sad') {
+        // Extended Sad Sound
+        const notes = [196.00, 233.08, 293.66, 174.61]; // G Minor with F
+        notes.forEach((freq, i) => {
+           const sOsc = ctx.createOscillator();
+           const sGain = ctx.createGain();
+           sOsc.type = 'sine';
+           sOsc.frequency.value = freq;
+           sGain.gain.setValueAtTime(0, now + i*0.5);
+           sGain.gain.linearRampToValueAtTime(0.15 * vol, now + 1.0 + i*0.5);
+           sGain.gain.exponentialRampToValueAtTime(0.001, now + 6.0 + i*0.5);
+           sOsc.connect(sGain);
+           sGain.connect(ctx.destination);
+           sOsc.start(now + i*0.5); sOsc.stop(now + 6.0 + i*0.5);
+        });
+    } else if (type === 'hopeful_pill') {
+        const notes = [261.63, 329.63, 392.00, 523.25]; // C Major
+        notes.forEach((freq, i) => {
+           const hOsc = ctx.createOscillator();
+           const hGain = ctx.createGain();
+           hOsc.type = 'triangle';
+           hOsc.frequency.value = freq;
+           hGain.gain.setValueAtTime(0, now + (i * 0.1));
+           hGain.gain.linearRampToValueAtTime(0.1 * vol, now + (i * 0.1) + 0.1);
+           hGain.gain.exponentialRampToValueAtTime(0.001, now + (i * 0.1) + 2.0);
+           hOsc.connect(hGain);
+           hGain.connect(ctx.destination);
+           hOsc.start(now + (i * 0.1));
+           hOsc.stop(now + (i * 0.1) + 2.0);
+        });
+    } else if (type === 'panic') {
+        const osc = ctx.createOscillator();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(800, now);
+        osc.frequency.linearRampToValueAtTime(200, now + 0.5);
+        gain.gain.setValueAtTime(0.3 * vol, now);
+        gain.gain.linearRampToValueAtTime(0, now + 0.5);
+        osc.start(now); osc.stop(now + 0.5);
     }
   };
 
@@ -318,33 +370,62 @@ const App: React.FC = () => {
     setMood('curious');
     deathCountRef.current = 0;
     setHealth(1.0);
+    setResetKey(0);
+    setIsChaosMode(false);
   };
   
   const handleResume = () => {
+    if (status === GameStatus.PAUSED) {
+      setStatus(GameStatus.PLAYING);
+      return;
+    }
     initAudio();
     setLevelId(maxReachedLevel);
     setStatus(GameStatus.PLAYING);
     setMood('curious');
     deathCountRef.current = 0;
     setHealth(1.0);
+    setResetKey(0);
+    setIsChaosMode(false);
+  };
+
+  const handlePause = () => {
+    if (status === GameStatus.PLAYING) setStatus(GameStatus.PAUSED);
+  };
+
+  const handleRestartLevel = () => {
+    setResetKey(prev => prev + 1);
+    setStatus(GameStatus.PLAYING);
+    setHealth(1.0);
+    setMood('curious');
+    deathCountRef.current = 0;
+    setIsChaosMode(false);
   };
 
   const handleGameOver = () => {
     setStatus(GameStatus.GAME_OVER);
+    setIsChaosMode(false);
     deathCountRef.current += 1;
+    
+    if (deathCountRef.current >= wisdomThreshold.current) {
+        const quote = WISDOM_QUOTES[Math.floor(Math.random() * WISDOM_QUOTES.length)];
+        setWisdomToast(quote);
+        playSound('pill'); 
+        wisdomThreshold.current += Math.floor(Math.random() * 5) + 6;
+    }
+
     if (deathCountRef.current > 2) setMood('calm');
   };
 
   const handleRetry = () => {
     setStatus(GameStatus.PLAYING);
-    // On retry, we reload the level, so health resets to 1.0? 
-    // Or logic dictates respawn at checkpoint handles internal health.
-    // For Game Over retry, we usually reset to 1.0 at start of level.
     setHealth(1.0);
+    setIsChaosMode(false);
   };
 
   const handleGoHome = () => {
     setStatus(GameStatus.MENU);
+    setIsChaosMode(false);
   };
 
   const handleLevelComplete = async () => {
@@ -352,8 +433,8 @@ const App: React.FC = () => {
     if (nextId > maxReachedLevel) setMaxReachedLevel(nextId);
     deathCountRef.current = 0;
     setMood('curious');
+    setIsChaosMode(false);
     
-    // Preserve Health
     setHealth(h => Math.max(1.0, h));
     
     if (nextId > LEVELS.length) {
@@ -371,10 +452,12 @@ const App: React.FC = () => {
   const handleNextLevel = () => {
     setLevelId(prev => prev + 1);
     setStatus(GameStatus.PLAYING);
+    setResetKey(0);
   };
 
   const handleVictory = async () => {
     setStatus(GameStatus.VICTORY);
+    setIsChaosMode(false);
     setLoadingStory(true);
     const text = await generateLevelNarrative("Paradise", true);
     setNarrative(text);
@@ -384,10 +467,9 @@ const App: React.FC = () => {
   const handleMoodUpdate = (distanceToGoal: number, distanceToMonster: number) => {
      if (status !== GameStatus.PLAYING) return;
      
-     // Mood Priority: Tense -> Hopeful -> Calm/Curious
      if (distanceToMonster < 200) {
         if (mood !== 'tense') setMood('tense');
-     } else if (distanceToGoal < 1000) { // UPDATED TO 1000px
+     } else if (distanceToGoal < 1000) { 
         if (mood !== 'hopeful') setMood('hopeful');
      } else {
         if (mood === 'tense' || mood === 'hopeful') {
@@ -427,7 +509,6 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-zinc-950 flex flex-col items-center justify-center p-4 font-sans text-white overflow-hidden relative selection:bg-cyan-500/30">
-      {/* HUD */}
       <div className={`absolute top-4 left-0 right-0 flex justify-between px-8 pointer-events-none transition-opacity duration-1000 ${status === GameStatus.VICTORY ? 'opacity-0' : 'opacity-100'} z-40`}>
         <div className="text-left flex flex-col gap-2">
            <div>
@@ -440,13 +521,17 @@ const App: React.FC = () => {
         </div>
       </div>
 
-      {/* Controls */}
       <div className="absolute top-4 right-4 flex gap-2 z-50">
+        {status === GameStatus.PLAYING && (
+          <button onClick={handlePause} className="p-2 bg-zinc-900/50 text-cyan-500 hover:text-cyan-300 hover:bg-zinc-800 rounded-full transition border border-zinc-700">
+             <Pause size={20} />
+          </button>
+        )}
+        <button onClick={() => setShowStory(true)} className="p-2 bg-zinc-900/50 text-cyan-500 hover:text-cyan-300 hover:bg-zinc-800 rounded-full transition border border-zinc-700"><BookOpen size={20} /></button>
         <button onClick={() => setShowObjective(true)} className="p-2 bg-zinc-900/50 text-cyan-500 hover:text-cyan-300 hover:bg-zinc-800 rounded-full transition border border-zinc-700"><HelpCircle size={20} /></button>
         <button onClick={() => setShowSettings(true)} className="p-2 bg-zinc-900/50 text-cyan-500 hover:text-cyan-300 hover:bg-zinc-800 rounded-full transition border border-zinc-700"><Settings size={20} /></button>
       </div>
 
-      {/* Toasts */}
       {wisdomToast && (
         <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-4 fade-in duration-500">
            <div className="bg-cyan-950/90 border border-cyan-500/50 px-6 py-3 rounded-full shadow-[0_0_30px_rgba(0,255,255,0.2)] flex items-center gap-3">
@@ -463,9 +548,7 @@ const App: React.FC = () => {
            </div>
         </div>
       )}
-
-      {/* Modals (Journey, Objective, Settings) - same structure as before, omitted for brevity if no changes, but including full file content to be safe */}
-      {/* ... (Journey Modal) ... */}
+      
       {showJourney && (
         <div className="absolute inset-0 bg-black/95 flex items-center justify-center z-50 backdrop-blur-sm animate-in fade-in">
            <div className="bg-zinc-900 p-8 rounded-2xl border border-zinc-700 max-w-4xl w-full relative mx-4">
@@ -482,10 +565,12 @@ const App: React.FC = () => {
                       const isLast = lvl.id === LEVELS.length;
                       return (
                         <div key={lvl.id} className="relative z-10 flex flex-col items-center gap-4 snap-center mx-6 min-w-[100px]">
-                            <div className={`w-16 h-16 rounded-full border-2 flex items-center justify-center transition-all duration-300 ${isCurrent ? 'bg-cyan-900 border-cyan-400 scale-125 shadow-[0_0_20px_cyan]' : isUnlocked ? 'bg-zinc-800 border-cyan-700 text-cyan-500' : 'bg-black border-zinc-800 text-zinc-700'}`}>
-                              {isUnlocked ? (isCurrent ? <div className="w-4 h-4 bg-cyan-400 rounded-full animate-pulse"></div> : (isLast ? <Heart size={20} /> : <span className="text-lg font-bold">{lvl.id}</span>)) : <span>?</span>}
+                            <div 
+                              onClick={() => { if (isUnlocked) { setLevelId(lvl.id); setShowJourney(false); setStatus(GameStatus.PLAYING); setResetKey(0); }}}
+                              className={`w-16 h-16 rounded-full border-2 flex items-center justify-center transition-all duration-300 cursor-pointer ${isCurrent ? 'bg-cyan-900 border-cyan-400 scale-125 shadow-[0_0_20px_cyan]' : isUnlocked ? 'bg-zinc-800 border-cyan-700 text-cyan-500 hover:bg-zinc-700' : 'bg-black border-zinc-800 text-zinc-800 cursor-not-allowed'}`}>
+                              {isUnlocked ? (isCurrent ? <div className="w-4 h-4 bg-cyan-400 rounded-full animate-pulse"></div> : (isLast ? <Heart size={20} /> : <span className="text-lg font-bold">{lvl.id}</span>)) : <span className="opacity-30">?</span>}
                             </div>
-                            <span className={`text-xs tracking-wider uppercase text-center font-bold ${isUnlocked ? 'text-cyan-200' : 'text-zinc-700'}`}>{lvl.name}</span>
+                            <span className={`text-xs tracking-wider uppercase text-center font-bold ${isUnlocked ? 'text-cyan-200' : 'text-zinc-800'}`}>{isUnlocked ? lvl.name : '???'}</span>
                         </div>
                       )
                     })}
@@ -497,7 +582,6 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* ... (Objective Modal) ... */}
       {showObjective && (
         <div className="absolute inset-0 bg-black/90 flex items-center justify-center z-50 backdrop-blur-sm">
            <div className="bg-zinc-900 p-8 rounded-2xl border border-cyan-900/50 max-w-lg w-full relative">
@@ -507,7 +591,7 @@ const App: React.FC = () => {
                <div className="space-y-4 text-sm text-gray-300 border-r border-zinc-800 pr-4">
                  <h3 className="text-white font-bold uppercase tracking-wider text-xs mb-2">Mechanics</h3>
                  <p className="flex items-center gap-2"><div className="w-3 h-3 bg-cyan-400 rounded-full"></div> You are the Light.</p>
-                 <p className="flex items-center gap-2"><Heart size={12} className="text-red-500 fill-red-500"/> 2 Hits = Death.</p>
+                 <p className="flex items-center gap-2"><Heart size={12} className="text-red-500 fill-red-500"/> Hazards = Death.</p>
                  <p className="flex items-center gap-2"><div className="w-3 h-3 bg-green-400"></div> Checkpoints save progress.</p>
                  <p className="flex items-center gap-2"><div className="w-3 h-3 bg-yellow-400 rounded-full shadow-[0_0_5px_yellow]"></div> Wisdom Pills restore health.</p>
                </div>
@@ -520,8 +604,34 @@ const App: React.FC = () => {
            </div>
         </div>
       )}
+      
+      {showStory && (
+        <div className="absolute inset-0 bg-black/90 flex items-center justify-center z-50 backdrop-blur-sm">
+           <div className="bg-zinc-900 p-8 rounded-2xl border border-cyan-900/50 max-w-xl w-full relative max-h-[80vh] overflow-y-auto">
+             <button onClick={() => setShowStory(false)} className="absolute top-4 right-4 text-gray-500 hover:text-white"><X size={20} /></button>
+             <div className="mb-8 text-center"><h2 className="text-2xl font-bold text-cyan-400 mb-2 font-serif tracking-widest">THE LEGEND OF LUMINA</h2></div>
+             <div className="space-y-6 text-sm text-gray-300 font-serif leading-relaxed px-4">
+               <p>
+                 In the beginning, there was only the Void—a vast, silent expanse of eternal night. Within this darkness, two twin stars were born: <strong>Lumina</strong>, the blue spark of Resolve, and <strong>Aura</strong>, the pink essence of Hope.
+               </p>
+               <p>
+                 Together, they danced through the cosmos, creating nebulae and painting the universe with color. But the Void grew jealous of their brilliance. A great cosmic storm, the "Silent Storm," tore them apart, casting Aura into the deepest, furthest reaches of existence where light had never touched.
+               </p>
+               <p>
+                 Alone and fading, Lumina refused to let his light die. He sensed Aura's faint pulse calling from beyond the shadows. He knew the journey would be perilous—filled with monsters born of fear, illusions of despair, and the crushing weight of solitude.
+               </p>
+               <p>
+                 Your objective is simple yet profound: <strong>Reunite with Aura.</strong>
+               </p>
+               <p className="italic text-cyan-100 border-l-2 border-cyan-500 pl-4">
+                 "Travel through the treacherous realms, gather wisdom to keep your spirit bright, and overcome the darkness. For only when Resolve meets Hope can the universe bloom once more."
+               </p>
+             </div>
+             <div className="mt-8 flex justify-center"><button onClick={() => setShowStory(false)} className="px-8 py-2 bg-cyan-900 text-cyan-100 rounded hover:bg-cyan-800 tracking-widest uppercase text-xs">Begin Journey</button></div>
+           </div>
+        </div>
+      )}
 
-      {/* ... (Settings Modal) ... */}
       {showSettings && (
         <div className="absolute inset-0 bg-black/90 flex items-center justify-center z-50 backdrop-blur-md">
            <div className="bg-zinc-900 p-8 rounded-2xl border border-zinc-700 max-w-sm w-full shadow-2xl relative">
@@ -548,11 +658,56 @@ const App: React.FC = () => {
            </div>
         </div>
       )}
+      
+      {showCredits && (
+        <div className="absolute inset-0 bg-black/90 flex items-center justify-center z-50 backdrop-blur-md">
+           <div className="bg-zinc-900 p-8 rounded-2xl border border-zinc-700 max-w-sm w-full shadow-2xl relative text-center">
+             <button onClick={() => setShowCredits(false)} className="absolute top-4 right-4 text-gray-500 hover:text-white"><X size={20} /></button>
+             <h2 className="text-xl font-bold text-cyan-400 mb-2 uppercase tracking-wider">Developer</h2>
+             <div className="w-16 h-1 bg-cyan-500 mx-auto mb-8 rounded"></div>
+             
+             <div className="mb-8">
+               <div className="w-20 h-20 bg-zinc-800 rounded-full mx-auto mb-4 flex items-center justify-center border-2 border-cyan-500/50">
+                 <User size={40} className="text-cyan-500" />
+               </div>
+               <h3 className="text-xl font-bold text-white mb-1">Koushan De</h3>
+               <p className="text-gray-500 text-sm">Creator & Developer</p>
+             </div>
 
-      {/* Game Container */}
+             <div className="space-y-4">
+               <a href="https://www.linkedin.com/in/koushan-de-04a966192/" target="_blank" rel="noopener noreferrer" 
+                  className="block w-full py-3 bg-[#0077b5] hover:bg-[#006396] text-white rounded transition flex items-center justify-center gap-2 text-sm font-bold tracking-wide">
+                  <ExternalLink size={16} /> Connect on LinkedIn
+               </a>
+               <a href="https://www.linkedin.com/in/koushan-de-04a966192/" target="_blank" rel="noopener noreferrer"
+                  className="block w-full py-3 bg-zinc-800 border border-zinc-600 hover:bg-zinc-700 text-white rounded transition flex items-center justify-center gap-2 text-sm font-bold tracking-wide">
+                  <Coffee size={16} className="text-yellow-500" /> Support Developer
+               </a>
+             </div>
+           </div>
+        </div>
+      )}
+
+      {status === GameStatus.PAUSED && (
+         <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center z-50 animate-in fade-in duration-200">
+            <h2 className="text-4xl font-bold text-cyan-400 mb-8 tracking-[0.2em] font-serif" style={{ textShadow: '0 0 20px cyan' }}>PAUSED</h2>
+            <div className="flex flex-col gap-4 w-64">
+               <button onClick={handleResume} className="px-6 py-3 bg-zinc-900 border border-zinc-700 hover:border-cyan-500 hover:text-cyan-400 text-gray-300 transition uppercase tracking-widest text-xs flex items-center justify-center gap-2">
+                 <Play size={14} /> Resume
+               </button>
+               <button onClick={handleRestartLevel} className="px-6 py-3 bg-zinc-900 border border-zinc-700 hover:border-red-500 hover:text-red-400 text-gray-300 transition uppercase tracking-widest text-xs flex items-center justify-center gap-2">
+                 <RotateCcw size={14} /> Restart Level
+               </button>
+               <button onClick={handleGoHome} className="px-6 py-3 bg-zinc-900 border border-zinc-700 hover:border-gray-500 hover:text-white text-gray-300 transition uppercase tracking-widest text-xs flex items-center justify-center gap-2">
+                 <Home size={14} /> Menu
+               </button>
+            </div>
+         </div>
+      )}
+
       <div className="relative w-full max-w-[800px] aspect-[4/3] shadow-2xl rounded-lg overflow-hidden ring-1 ring-zinc-800 bg-black">
         <GameCanvas 
-          key={levelId} // CRITICAL: Forces remount on level change to ensure fresh state init
+          key={`${levelId}-${resetKey}`} 
           status={status} 
           currentLevelId={levelId}
           settings={settings}
@@ -565,6 +720,7 @@ const App: React.FC = () => {
           onHealthChange={setHealth}
           onShowWisdom={(msg) => setWisdomToast(msg)}
           onCheckpointSave={() => setCheckpointToast(true)}
+          onChaosStart={(active) => setIsChaosMode(active)}
         />
 
         {status === GameStatus.MENU && (
@@ -582,6 +738,7 @@ const App: React.FC = () => {
                 <button onClick={handleStartNew} className="group relative px-4 py-3 bg-zinc-900 border border-zinc-700 hover:border-cyan-500 hover:text-cyan-400 text-gray-300 transition uppercase tracking-widest text-xs">New Game</button>
                 <button onClick={() => setShowJourney(true)} className="group relative px-4 py-3 bg-zinc-900 border border-zinc-700 hover:border-purple-500 hover:text-purple-400 text-gray-300 transition uppercase tracking-widest text-xs flex items-center justify-center gap-2"><Map size={14} /> Journey</button>
               </div>
+              <button onClick={() => setShowCredits(true)} className="mt-8 text-xs text-gray-600 hover:text-cyan-500 transition uppercase tracking-widest">Credits</button>
             </div>
           </div>
         )}
@@ -606,7 +763,10 @@ const App: React.FC = () => {
                <div className="min-h-[100px] flex items-center justify-center mb-8 relative">
                  {loadingStory ? <span className="animate-pulse text-gray-500">Consulting the stars...</span> : <p className="text-lg font-serif italic text-gray-400 leading-relaxed">"{narrative}"</p>}
                </div>
-               <button onClick={handleNextLevel} disabled={loadingStory} className="px-10 py-3 bg-indigo-900/50 text-indigo-200 border border-indigo-800 hover:bg-indigo-800 transition-all uppercase tracking-wider text-sm disabled:opacity-50">Enter Level {levelId + 1}</button>
+               <div className="flex flex-col gap-3">
+                 <button onClick={handleNextLevel} disabled={loadingStory} className="px-10 py-3 bg-indigo-900/50 text-indigo-200 border border-indigo-800 hover:bg-indigo-800 transition-all uppercase tracking-wider text-sm disabled:opacity-50">Enter Level {levelId + 1}</button>
+                 <button onClick={handleGoHome} className="px-10 py-3 bg-zinc-900/50 text-gray-400 border border-zinc-800 hover:bg-zinc-800 transition-all uppercase tracking-wider text-sm">Main Menu</button>
+               </div>
             </div>
           </div>
         )}

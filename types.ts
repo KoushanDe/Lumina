@@ -8,9 +8,13 @@ export enum EntityType {
   PARTICLE = 'PARTICLE',
   SIGN = 'SIGN',
   MONSTER = 'MONSTER',
+  SHOOTER = 'SHOOTER',
+  PROJECTILE = 'PROJECTILE',
   NPC = 'NPC',
+  MIRAGE_NPC = 'MIRAGE_NPC',
   CHECKPOINT = 'CHECKPOINT',
-  PILL = 'PILL'
+  PILL = 'PILL',
+  EVIL_PILL = 'EVIL_PILL'
 }
 
 export interface Vector2 {
@@ -50,6 +54,7 @@ export interface Level {
 export enum GameStatus {
   MENU = 'MENU',
   PLAYING = 'PLAYING',
+  PAUSED = 'PAUSED',
   RESPAWNING = 'RESPAWNING',
   LEVEL_COMPLETE = 'LEVEL_COMPLETE',
   GAME_OVER = 'GAME_OVER',
